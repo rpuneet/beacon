@@ -1419,13 +1419,8 @@ struct ContentView: View {
                 .onDisappear { viewModel.isLocationChannelsSheetPresented = false }
         }
         .sheet(isPresented: $showGroupTrackingSheet) {
-            #if os(iOS)
             BeaconSheetView()
                 .environmentObject(viewModel)
-            #else
-            GroupTrackingView()
-                .environmentObject(viewModel)
-            #endif
         }
         .sheet(isPresented: $showLocationNotes, onDismiss: {
             notesGeohash = nil
