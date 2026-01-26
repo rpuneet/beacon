@@ -28,13 +28,10 @@ enum NoiseSecurityConstants {
     static let maxSessionsPerPeer = 3
     
     // Rate limiting
-    // Note: Mesh relays can duplicate handshake packets, and periodic tracking
-    // requests can trigger many handshake attempts. Set limits high enough to
-    // allow legitimate traffic while still preventing abuse.
-    static let maxHandshakesPerMinute = 60  // ~1 per second is reasonable
+    static let maxHandshakesPerMinute = 10
     static let maxMessagesPerSecond = 100
-
+    
     // Global rate limiting (across all peers)
-    static let maxGlobalHandshakesPerMinute = 200
+    static let maxGlobalHandshakesPerMinute = 30
     static let maxGlobalMessagesPerSecond = 500
 }

@@ -621,14 +621,6 @@ extension ChatViewModel {
         relayMgr.subscribe(filter: filter, id: "chat-messages") { [weak self] event in
             self?.handleNostrMessage(event)
         }
-
-        // Verify subscription was registered
-        let hasHandler = relayMgr.hasSubscription(id: "chat-messages")
-        if hasHandler {
-            SecureLogger.info("📋 setupNostrMessageHandling: ✅ Gift wrap subscription registered successfully", category: .session)
-        } else {
-            SecureLogger.warning("📋 setupNostrMessageHandling: ⚠️ Gift wrap subscription may have failed (handler not found)", category: .session)
-        }
     }
     
     func handleNostrMessage(_ giftWrap: NostrEvent) {

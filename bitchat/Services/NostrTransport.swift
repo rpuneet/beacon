@@ -405,9 +405,6 @@ extension NostrTransport {
     /// Creates and sends a gift-wrapped private message event
     @MainActor
     private func sendWrappedMessage(content: String, recipientHex: String, senderIdentity: NostrIdentity, registerPending: Bool = false) {
-        let relayStatus = NostrRelayManager.shared.humanReadableStatus
-        SecureLogger.info("NostrTransport: sendWrappedMessage - relay status: \(relayStatus), recipientHex (full): \(recipientHex)", category: .session)
-
         guard let event = try? NostrProtocol.createPrivateMessage(content: content, recipientPubkey: recipientHex, senderIdentity: senderIdentity) else {
             SecureLogger.error("NostrTransport: failed to build Nostr event", category: .session)
             return

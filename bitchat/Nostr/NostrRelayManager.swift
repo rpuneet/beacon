@@ -28,25 +28,19 @@ final class NostrRelayManager: ObservableObject {
     }
     
     // Default relay list (can be customized)
-    // Note: Avoid relays with web-of-trust requirements or that block kind 1059 (gift wraps)
     private static let defaultRelays = [
         "wss://relay.damus.io",
         "wss://nos.lol",
         "wss://relay.primal.net",
-        "wss://relay.snort.social",
-        "wss://nostr.mutinywallet.com"
+        "wss://offchain.pub",
+        "wss://nostr21.com"
         // For local testing, you can add: "ws://localhost:8080"
     ]
     private static let defaultRelaySet = Set(defaultRelays)
     
     @Published private(set) var relays: [Relay] = []
     @Published private(set) var isConnected = false
-
-    /// Number of currently connected relays
-    var connectedRelayCount: Int {
-        relays.filter { $0.isConnected }.count
-    }
-
+    
     private var allowDefaultRelays: Bool = false
     private var hasMutualFavorites: Bool = false
     private var hasLocationPermission: Bool = false
@@ -86,10 +80,6 @@ final class NostrRelayManager: ObservableObject {
     
     // Bump generation to invalidate scheduled reconnects when we reset/disconnect
     private var connectionGeneration: Int = 0
-
-    // Per-relay rate limiting to prevent "noting too much" errors
-    private var lastSendTime: [String: Date] = [:]
-    private let minSendInterval: TimeInterval = 0.5  // 500ms between sends to same relay
     
     init() {
         hasMutualFavorites = !FavoritesPersistenceService.shared.mutualFavorites.isEmpty
@@ -253,19 +243,7 @@ final class NostrRelayManager: ObservableObject {
             }
         }
     }
-
-    /// Check if a subscription handler is registered for the given ID
-    func hasSubscription(id: String) -> Bool {
-        return messageHandlers[id] != nil
-    }
-
-    /// Get diagnostic info about active subscriptions
-    func getSubscriptionStatus() -> (handlers: [String], activeOnRelays: [String: Set<String>], pending: [String: [String]]) {
-        let handlerIds = Array(messageHandlers.keys)
-        let pendingIds = pendingSubscriptions.mapValues { Array($0.keys) }
-        return (handlers: handlerIds, activeOnRelays: subscriptions, pending: pendingIds)
-    }
-
+    
     /// Subscribe to events matching a filter. If `relayUrls` provided, targets only those relays.
     func subscribe(
         filter: NostrFilter,
@@ -275,10 +253,7 @@ final class NostrRelayManager: ObservableObject {
         onEOSE: (() -> Void)? = nil
     ) {
         // Global network policy gate
-        guard networkService.activationAllowed else {
-            SecureLogger.warning("📋 NostrRelayManager: subscribe(\(id)) blocked - network activation not allowed", category: .session)
-            return
-        }
+        guard networkService.activationAllowed else { return }
         // Coalesce rapid duplicate subscribe requests only if a handler already exists
         let now = Date()
         if messageHandlers[id] != nil {
@@ -288,23 +263,18 @@ final class NostrRelayManager: ObservableObject {
         }
         subscribeCoalesce[id] = now
         if shouldUseTor && TorManager.shared.torEnforced && !TorManager.shared.isReady {
-            SecureLogger.info("📋 NostrRelayManager: subscribe(\(id)) deferred - waiting for Tor", category: .session)
             // Defer subscription setup until Tor is ready; avoid queuing subs early
             Task.detached { [weak self] in
                 guard let self = self else { return }
                 let ready = await TorManager.shared.awaitReady()
                 await MainActor.run {
                     if ready {
-                        SecureLogger.info("📋 NostrRelayManager: Tor ready, retrying subscribe(\(id))", category: .session)
                         self.subscribe(filter: filter, id: id, relayUrls: relayUrls, handler: handler)
-                    } else {
-                        SecureLogger.warning("📋 NostrRelayManager: subscribe(\(id)) failed - Tor not ready", category: .session)
                     }
                 }
             }
             return
         }
-        SecureLogger.info("📋 NostrRelayManager: subscribe(\(id)) handler registered", category: .session)
         messageHandlers[id] = handler
         
         let req = NostrRequest.subscribe(id: id, filters: [filter])
@@ -506,23 +476,15 @@ final class NostrRelayManager: ObservableObject {
 
     /// Send any queued subscriptions for a relay that just connected.
     private func flushPendingSubscriptions(for relayUrl: String) {
-        guard let map = pendingSubscriptions[relayUrl], !map.isEmpty else {
-            SecureLogger.debug("📋 flushPendingSubscriptions(\(relayUrl.suffix(20))): No pending subs", category: .session)
-            return
-        }
-        guard let connection = connections[relayUrl] else {
-            SecureLogger.warning("📋 flushPendingSubscriptions(\(relayUrl.suffix(20))): No connection", category: .session)
-            return
-        }
-        SecureLogger.info("📋 flushPendingSubscriptions(\(relayUrl.suffix(20))): Sending \(map.count) subscriptions: [\(map.keys.joined(separator: ", "))]", category: .session)
+        guard let map = pendingSubscriptions[relayUrl], !map.isEmpty else { return }
+        guard let connection = connections[relayUrl] else { return }
         for (id, messageString) in map {
             if self.subscriptions[relayUrl]?.contains(id) == true { continue }
             connection.send(.string(messageString)) { error in
                 if let error = error {
-                    SecureLogger.error("❌ Failed to send pending subscription \(id) to \(relayUrl): \(error)", category: .session)
+                    SecureLogger.error("❌ Failed to send pending subscription to \(relayUrl): \(error)", category: .session)
                 } else {
                     Task { @MainActor in
-                        SecureLogger.debug("📋 Subscription \(id) sent to \(relayUrl.suffix(20))", category: .session)
                         var subs = self.subscriptions[relayUrl] ?? Set<String>()
                         subs.insert(id)
                         self.subscriptions[relayUrl] = subs
@@ -568,10 +530,7 @@ final class NostrRelayManager: ObservableObject {
     private func handleParsedMessage(_ parsed: ParsedInbound, from relayUrl: String) {
         switch parsed {
         case .event(let subId, let event):
-            if event.kind == 1059 {
-                // Log gift wrap events for debugging relay tracking
-                SecureLogger.info("📥 GiftWrap kind=1059 id=\(event.id.prefix(16))… relay=\(relayUrl) sub=\(subId)", category: .session)
-            } else {
+            if event.kind != 1059 {
                 SecureLogger.debug("📥 Event kind=\(event.kind) id=\(event.id.prefix(16))… relay=\(relayUrl)", category: .session)
             }
             if let index = self.relays.firstIndex(where: { $0.url == relayUrl }) {
@@ -580,7 +539,7 @@ final class NostrRelayManager: ObservableObject {
             if let handler = self.messageHandlers[subId] {
                 handler(event)
             } else {
-                SecureLogger.warning("⚠️ No handler for subscription \(subId) (kind=\(event.kind))", category: .session)
+                SecureLogger.warning("⚠️ No handler for subscription \(subId)", category: .session)
             }
         case .eose(let subId):
             if var tracker = eoseTrackers[subId] {
@@ -600,9 +559,9 @@ final class NostrRelayManager: ObservableObject {
             } else {
                 let isGiftWrap = Self.pendingGiftWrapIDs.remove(eventId) != nil
                 if isGiftWrap {
-                    SecureLogger.warning("📮 Rejected id=\(eventId.prefix(16))… relay=\(relayUrl) reason=\(reason)", category: .session)
+                    SecureLogger.warning("📮 Rejected id=\(eventId.prefix(16))… reason=\(reason)", category: .session)
                 } else {
-                    SecureLogger.error("📮 Rejected id=\(eventId.prefix(16))… relay=\(relayUrl) reason=\(reason)", category: .session)
+                    SecureLogger.error("📮 Rejected id=\(eventId.prefix(16))… reason=\(reason)", category: .session)
                 }
             }
         case .notice:
@@ -611,38 +570,20 @@ final class NostrRelayManager: ObservableObject {
     }
     
     private func sendToRelay(event: NostrEvent, connection: URLSessionWebSocketTask, relayUrl: String) {
-        // Check per-relay rate limit
-        let now = Date()
-        if let lastSend = lastSendTime[relayUrl] {
-            let elapsed = now.timeIntervalSince(lastSend)
-            if elapsed < minSendInterval {
-                // Delay the send to respect rate limit
-                let delay = minSendInterval - elapsed
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                    self?.doSendToRelay(event: event, connection: connection, relayUrl: relayUrl)
-                }
-                return
-            }
-        }
-        doSendToRelay(event: event, connection: connection, relayUrl: relayUrl)
-    }
-
-    private func doSendToRelay(event: NostrEvent, connection: URLSessionWebSocketTask, relayUrl: String) {
-        lastSendTime[relayUrl] = Date()
-
         let req = NostrRequest.event(event)
-
+        
         do {
             let data = try encoder.encode(req)
             let message = String(data: data, encoding: .utf8) ?? ""
-
+            
             SecureLogger.debug("📤 Send kind=\(event.kind) id=\(event.id.prefix(16))… relay=\(relayUrl)", category: .session)
-
+            
             connection.send(.string(message)) { [weak self] error in
                 DispatchQueue.main.async {
                     if let error = error {
                         SecureLogger.error("❌ Failed to send event to \(relayUrl): \(error)", category: .session)
                     } else {
+                        // SecureLogger.debug("✅ Event sent to relay: \(relayUrl)", category: .session)
                         // Update relay stats
                         if let index = self?.relays.firstIndex(where: { $0.url == relayUrl }) {
                             self?.relays[index].messagesSent += 1
@@ -777,58 +718,16 @@ final class NostrRelayManager: ObservableObject {
         disconnect()
         // New generation begins now
         connectionGeneration &+= 1
-
+        
         // Reset all relay states
         for index in relays.indices {
             relays[index].reconnectAttempts = 0
             relays[index].nextReconnectTime = nil
             relays[index].lastError = nil
         }
-
+        
         // Reconnect
         connect()
-    }
-
-    /// Human-readable connection status for UI display
-    var humanReadableStatus: String {
-        let connectedCount = relays.filter { $0.isConnected }.count
-        let totalCount = relays.count
-
-        if totalCount == 0 {
-            return "No relays configured"
-        } else if connectedCount == 0 {
-            // Check if we're allowed to connect
-            if !networkService.activationAllowed {
-                return "Network disabled"
-            }
-            // Check if all relays have permanently failed
-            let allFailed = relays.allSatisfy { isPermanentlyFailed($0.url) }
-            if allFailed {
-                return "All relays unreachable"
-            }
-            return "Connecting..."
-        } else if connectedCount == totalCount {
-            return "Connected"
-        } else {
-            return "Connected (\(connectedCount)/\(totalCount))"
-        }
-    }
-
-    /// Detailed status for debugging/settings view
-    func getDetailedStatus() -> [(url: String, status: String, error: String?)] {
-        return relays.map { relay in
-            let status: String
-            if relay.isConnected {
-                status = "Connected"
-            } else if isPermanentlyFailed(relay.url) {
-                status = "Failed"
-            } else if relay.reconnectAttempts > 0 {
-                status = "Reconnecting (\(relay.reconnectAttempts))"
-            } else {
-                status = "Connecting"
-            }
-            return (url: relay.url, status: status, error: relay.lastError?.localizedDescription)
-        }
     }
 
     // MARK: - Failure classification

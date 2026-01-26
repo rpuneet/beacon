@@ -16,9 +16,8 @@ final class BLEService: NSObject {
     
     // MARK: - Constants
 
-    // Use testnet UUID for debug builds, mainnet for release
     #if DEBUG
-    static let serviceUUID = CBUUID(string: "E47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5D") // testnet
+    static let serviceUUID = CBUUID(string: "F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5A") // testnet
     #else
     static let serviceUUID = CBUUID(string: "F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C") // mainnet
     #endif

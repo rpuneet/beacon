@@ -442,6 +442,7 @@ struct BeaconFavoriteRow: View {
 
 // MARK: - Sheet Wrapper
 
+#if os(iOS)
 struct BeaconSheetView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isExpanded = true
@@ -469,3 +470,4 @@ struct BeaconSheetView: View {
         print("Open chat with \(peerID)")
     }
 }
+#endif
