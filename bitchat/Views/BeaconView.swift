@@ -47,10 +47,12 @@ struct BeaconView: View {
 
             // Map section
             mapSection
+                .frame(minHeight: 200)
 
             // Favorites list (simple, no redundant counts)
             favoritesListView
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(backgroundColor)
         .onAppear {
             startTracking()
@@ -550,6 +552,9 @@ struct BeaconSheetView: View {
     var body: some View {
         BeaconView()
             .environmentObject(chatViewModel)
+            #if os(macOS)
+            .frame(minWidth: 420, minHeight: 520)
+            #endif
     }
 }
 
