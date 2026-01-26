@@ -1232,13 +1232,6 @@ struct ContentView: View {
         }
     }
 
-    private func openChatFromBeacon(_ peerID: PeerID) {
-        showGroupTrackingSheet = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            viewModel.selectedPrivateChatPeer = peerID
-        }
-    }
-
     private var mainHeaderView: some View {
         HStack(spacing: 0) {
             Text(verbatim: "bitchat/")
@@ -1427,7 +1420,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showGroupTrackingSheet) {
             #if os(iOS)
-            BeaconSheetView(onOpenChat: openChatFromBeacon)
+            BeaconSheetView()
                 .environmentObject(viewModel)
             #else
             GroupTrackingView()
