@@ -48,14 +48,14 @@ private struct TrackingButtonContent: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "star.fill")
+            Image(systemName: "location.north.circle.fill")
                 .font(.system(size: 14))
             if totalCount > 0 {
                 Text("\(activeCount)/\(totalCount)")
                     .font(.bitchatSystem(size: 10, design: .monospaced))
             }
         }
-        .foregroundColor(activeCount > 0 ? .green : (totalCount > 0 ? .yellow : .yellow.opacity(0.5)))
+        .foregroundColor(activeCount > 0 ? .green : (totalCount > 0 ? .green.opacity(0.6) : .gray.opacity(0.5)))
         .frame(minWidth: 24, minHeight: 24)
     }
 }
@@ -90,7 +90,6 @@ struct ContentView: View {
     @State private var expandedMessageIDs: Set<String> = []
     @State private var showLocationNotes = false
     @State private var notesGeohash: String? = nil
-    @State private var showTrackingSheet = false
     @State private var imagePreviewURL: URL? = nil
     @State private var recordingAlertMessage: String = ""
     @State private var showRecordingAlert = false
@@ -1035,16 +1034,6 @@ struct ContentView: View {
                                 ? String(localized: "content.accessibility.remove_favorite", comment: "Accessibility label to remove a favorite")
                                 : String(localized: "content.accessibility.add_favorite", comment: "Accessibility label to add a favorite")
                             )
-
-                            Button(action: {
-                                showTrackingSheet = true
-                            }) {
-                                Image(systemName: "location.magnifyingglass")
-                                    .font(.bitchatSystem(size: 14))
-                                    .foregroundColor(textColor)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Track peer")
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -1092,14 +1081,6 @@ struct ContentView: View {
                     }
                 }
         )
-        .sheet(isPresented: $showTrackingSheet) {
-            if let peerID = viewModel.selectedPrivateChatPeer,
-               let fingerprint = viewModel.getFingerprint(for: peerID) {
-                let nickname = viewModel.meshService.peerNickname(peerID: peerID) ?? String(peerID.id.prefix(8))
-                TrackingView(fingerprint: fingerprint, initialPeerID: peerID, nickname: nickname)
-                    .environmentObject(viewModel)
-            }
-        }
     }
 
     private func privateHeaderInfo(context: PrivateHeaderContext, privatePeerID: PeerID) -> some View {

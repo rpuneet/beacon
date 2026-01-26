@@ -316,7 +316,7 @@ struct BeaconMapPin: View {
     }
 }
 
-// MARK: - Favorite Row
+// MARK: - Favorite Row (Simple style matching People section)
 
 struct BeaconFavoriteRow: View {
     let nickname: String
@@ -325,16 +325,21 @@ struct BeaconFavoriteRow: View {
     let isPinging: Bool
     let onTrack: () -> Void
     let onMessage: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
 
     private var hasLocation: Bool {
         location?.hasLocation == true
+    }
+
+    private var hasUWB: Bool {
+        location?.uwbDistance != nil
     }
 
     private var trackingMethod: String {
         if let loc = location {
             if loc.uwbDistance != nil {
                 return "UWB"
-            } else if loc.transport == .ble {
+            } else if loc.transport == PeerLocation.TransportType.ble {
                 return "BLE"
             } else {
                 return "GPS"
@@ -346,96 +351,67 @@ struct BeaconFavoriteRow: View {
     private var statusColor: Color {
         if hasLocation {
             return .green
-        } else if location != nil {
-            return .orange
         } else {
-            return .gray
+            return colorScheme == .dark ? .gray : .gray.opacity(0.6)
         }
     }
 
+    private var textColor: Color {
+        colorScheme == .dark ? .green : Color(red: 0, green: 0.5, blue: 0)
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            // Avatar
-            ZStack(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(statusColor.opacity(0.2))
-                    .frame(width: 44, height: 44)
-                    .overlay(
-                        Text(String(nickname.prefix(1)).uppercased())
-                            .font(.system(size: 18, weight: .semibold, design: .rounded))
-                            .foregroundColor(statusColor)
-                    )
+        HStack(spacing: 8) {
+            // Status indicator
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
 
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 14, height: 14)
-                    .overlay(Circle().stroke(.white, lineWidth: 2))
-                    .offset(x: 2, y: 2)
-            }
+            // Name
+            Text(nickname)
+                .font(Font.bitchatSystem(size: 14, design: .monospaced))
+                .foregroundColor(hasLocation ? textColor : .secondary)
 
-            // Info
-            VStack(alignment: .leading, spacing: 2) {
-                Text(nickname)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.primary)
-
-                HStack(spacing: 4) {
-                    if hasLocation {
-                        Text(trackingMethod)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(statusColor)
-                            .clipShape(Capsule())
-
-                        if let pingMs = location?.pingMs, pingMs > 0 {
-                            Text("\(pingMs)ms")
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(.secondary)
-                        }
-                    } else if isPinging {
-                        Text("Searching...")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("Tap to locate")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                    }
-                }
+            // Tracking method badge
+            if hasLocation {
+                Text(trackingMethod)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(hasUWB ? Color.blue : (location?.transport == PeerLocation.TransportType.ble ? Color.green : Color.purple))
+                    .clipShape(Capsule())
             }
 
             Spacer()
 
-            // Action buttons
-            HStack(spacing: 8) {
-                // Track button
-                Button(action: onTrack) {
-                    Image(systemName: "location.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(hasLocation ? .green : .gray)
-                        .frame(width: 36, height: 36)
-                        .background(Color.green.opacity(hasLocation ? 0.15 : 0.05))
-                        .clipShape(Circle())
-                }
-                .disabled(!hasLocation)
-
-                // Message button
-                Button(action: onMessage) {
-                    Image(systemName: "message.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(.blue)
-                        .frame(width: 36, height: 36)
-                        .background(Color.blue.opacity(0.15))
-                        .clipShape(Circle())
-                }
+            // Navigation arrow (show location on map)
+            Button(action: onTrack) {
+                Image(systemName: "location.north.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(hasLocation ? .blue : .gray.opacity(0.4))
+                    .frame(width: 32, height: 32)
+                    .background(Color.blue.opacity(hasLocation ? 0.15 : 0.05))
+                    .clipShape(Circle())
             }
+            .buttonStyle(.plain)
+            .disabled(!hasLocation)
+
+            // Message button
+            Button(action: onMessage) {
+                Image(systemName: "message.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(.blue)
+                    .frame(width: 32, height: 32)
+                    .background(Color.blue.opacity(0.15))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 4)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
         .background(isSelected ? Color.green.opacity(0.1) : Color.clear)
-        .cornerRadius(10)
+        .cornerRadius(8)
         .contentShape(Rectangle())
     }
 }
