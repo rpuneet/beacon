@@ -2,7 +2,7 @@
 // BeaconView.swift
 // bitchat
 //
-// Full-screen beacon tracking view with map and friend list drawer
+// Track view - matches People section UI style
 //
 
 import SwiftUI
@@ -16,12 +16,7 @@ struct BeaconView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedFavoriteKey: Data?
-    @State private var drawerExpanded: Bool = false
     @State private var searchText: String = ""
-
-    private var beaconGreen: Color {
-        Color(red: 0.2, green: 0.8, blue: 0.4)
-    }
 
     private var textColor: Color {
         colorScheme == .dark ? .green : Color(red: 0, green: 0.5, blue: 0)
@@ -35,7 +30,6 @@ struct BeaconView: View {
         colorScheme == .dark ? Color.black : Color.white
     }
 
-    // Selected friend's location for overlay
     private var selectedLocation: PeerLocation? {
         guard let key = selectedFavoriteKey else { return nil }
         return getLocation(for: key)
@@ -47,15 +41,15 @@ struct BeaconView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            VStack(spacing: 0) {
-                // Map section
-                mapSection
-                    .frame(height: drawerExpanded ? geometry.size.height * 0.4 : geometry.size.height * 0.65)
+        VStack(spacing: 0) {
+            // Header (People section style)
+            headerView
 
-                // Drawer section
-                drawerSection
-            }
+            // Map section
+            mapSection
+
+            // Favorites list (simple, no redundant counts)
+            favoritesListView
         }
         .background(backgroundColor)
         .onAppear {
@@ -65,6 +59,53 @@ struct BeaconView: View {
             viewModel.trackingService.stopTracking()
             viewModel.trackingService.stopLocationAnnouncements()
         }
+    }
+
+    // MARK: - Header (People section style)
+
+    private var headerView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text("track")
+                    .font(.bitchatSystem(size: 18, design: .monospaced))
+                    .foregroundColor(textColor)
+
+                Spacer()
+
+                // Ping button (replaces QR icon position)
+                Button(action: { viewModel.pingAll() }) {
+                    Image(systemName: viewModel.isPinging ? "antenna.radiowaves.left.and.right" : "location.circle.fill")
+                        .font(.bitchatSystem(size: 14))
+                        .foregroundColor(viewModel.isPinging ? .orange : textColor)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isPinging)
+
+                // Close button
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Status line (like "#mesh 1 active")
+            HStack(spacing: 6) {
+                if viewModel.peersWithLocationCount > 0 {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 6, height: 6)
+                }
+                Text("\(viewModel.peersWithLocationCount) online")
+                    .foregroundColor(viewModel.peersWithLocationCount > 0 ? textColor : secondaryTextColor)
+            }
+            .font(.bitchatSystem(size: 12, design: .monospaced))
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 12)
+        .background(backgroundColor)
     }
 
     // MARK: - Map Section
@@ -101,82 +142,23 @@ struct BeaconView: View {
                 }
             }
 
-            // Top controls overlay (Close + Ping)
-            VStack {
-                HStack {
-                    // Close button
-                    Button(action: { dismiss() }) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.primary)
-                            .frame(width: 36, height: 36)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-
+            // Tracking popup overlay (when someone is selected)
+            if let location = selectedLocation, location.hasLocation == true {
+                VStack {
                     Spacer()
-
-                    // Status indicator
-                    if viewModel.isPinging {
-                        HStack(spacing: 4) {
-                            ProgressView()
-                                .scaleEffect(0.6)
-                            Text("pinging...")
-                                .font(.bitchatSystem(size: 11, design: .monospaced))
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Capsule())
-                    } else if viewModel.peersWithLocationCount > 0 {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(.green)
-                                .frame(width: 6, height: 6)
-                            Text("\(viewModel.peersWithLocationCount) online")
-                                .font(.bitchatSystem(size: 11, design: .monospaced))
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Capsule())
-                    }
-
-                    Spacer()
-
-                    // Ping button
-                    Button(action: { viewModel.pingAll() }) {
-                        Image(systemName: viewModel.isPinging ? "antenna.radiowaves.left.and.right" : "location.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.white)
-                            .frame(width: 36, height: 36)
-                            .background(beaconGreen)
-                            .clipShape(Circle())
-                            .shadow(color: beaconGreen.opacity(0.4), radius: 4, y: 2)
-                    }
-                    .disabled(viewModel.isPinging)
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 12)
-                .padding(.top, 12)
-
-                Spacer()
-
-                // Tracking overlay (when someone is selected)
-                if let location = selectedLocation, location.hasLocation == true {
-                    trackingOverlay(nickname: selectedNickname, location: location)
+                    trackingPopup(nickname: selectedNickname, location: location)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
         }
+        .frame(maxHeight: .infinity)
     }
 
-    // MARK: - Tracking Overlay (replaces sheet)
+    // MARK: - Tracking Popup (minimal with colored icons)
 
-    private func trackingOverlay(nickname: String, location: PeerLocation) -> some View {
-        VStack(spacing: 0) {
-            // Header with close
+    private func trackingPopup(nickname: String, location: PeerLocation) -> some View {
+        VStack(spacing: 12) {
+            // Header
             HStack {
                 Text(nickname)
                     .font(.bitchatSystem(size: 14, weight: .semibold, design: .monospaced))
@@ -195,312 +177,219 @@ struct BeaconView: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
 
-            // Direction indicator or hot/cold
-            if let uwbDistance = location.uwbDistance {
-                // UWB available - show direction arrow and hot/cold
-                uwbTrackingView(location: location, distance: Double(uwbDistance))
-            } else {
-                // GPS only - show hot/cold based on accuracy or simple indicator
-                gpsTrackingView(location: location)
+            // Arrow + distance/accuracy
+            HStack(spacing: 16) {
+                // Direction arrow
+                directionArrowView(location: location)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    // Staleness
+                    let staleness = Date().timeIntervalSince(location.timestamp)
+                    let stalenessText = formatStaleness(staleness)
+
+                    if let uwbDistance = location.uwbDistance {
+                        Text(formatDistance(Double(uwbDistance)))
+                            .font(.system(size: 24, weight: .bold, design: .rounded))
+                            .foregroundColor(.primary)
+                    } else if let accuracy = location.horizontalAccuracy {
+                        Text("±\(Int(accuracy))m")
+                            .font(.system(size: 24, weight: .bold, design: .rounded))
+                            .foregroundColor(.primary)
+                    }
+
+                    Text(stalenessText)
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(staleness > 60 ? .orange : .secondary)
+                }
+
+                Spacer()
             }
 
-            // Details grid
-            trackingDetailsGrid(location: location)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
+            // Icons grid (colored icons + values only, no labels)
+            iconsGridView(location: location)
         }
+        .padding(16)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
     }
 
-    private func uwbTrackingView(location: PeerLocation, distance: Double) -> some View {
-        let hotColdColor = getHotColdColor(distance: distance)
-        let hotColdText = getHotColdText(distance: distance)
+    private func directionArrowView(location: PeerLocation) -> some View {
+        let hasUWB = location.uwbDistance != nil
+        let distance = location.uwbDistance.map { Double($0) } ?? 10.0
+        let arrowColor = getHotColdColor(distance: distance, hasUWB: hasUWB)
         let directionAngle = getDirectionAngle(location: location)
 
+        return ZStack {
+            Circle()
+                .fill(arrowColor.opacity(0.2))
+                .frame(width: 56, height: 56)
+
+            Circle()
+                .stroke(arrowColor, lineWidth: 2)
+                .frame(width: 56, height: 56)
+
+            Image(systemName: hasUWB ? "arrow.up" : "location.fill")
+                .font(.system(size: hasUWB ? 24 : 20, weight: .bold))
+                .foregroundColor(arrowColor)
+                .rotationEffect(.degrees(hasUWB ? directionAngle : 0))
+        }
+    }
+
+    private func iconsGridView(location: PeerLocation) -> some View {
+        let connectionIcon: String
+        let connectionColor: Color
+        switch location.transport {
+        case .ble:
+            connectionIcon = "antenna.radiowaves.left.and.right"
+            connectionColor = .green
+        case .relay:
+            connectionIcon = "globe"
+            connectionColor = .purple
+        case .wifi:
+            connectionIcon = "wifi"
+            connectionColor = .blue
+        }
+
         return HStack(spacing: 16) {
-            // Direction arrow
-            ZStack {
-                Circle()
-                    .fill(hotColdColor.opacity(0.2))
-                    .frame(width: 60, height: 60)
-
-                Circle()
-                    .stroke(hotColdColor, lineWidth: 3)
-                    .frame(width: 60, height: 60)
-
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundColor(hotColdColor)
-                    .rotationEffect(.degrees(directionAngle))
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(hotColdText)
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(hotColdColor)
-
-                Text(formatDistance(distance))
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                    .foregroundColor(.primary)
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-    }
-
-    private func gpsTrackingView(location: PeerLocation) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "location.circle.fill")
-                .font(.system(size: 40))
-                .foregroundColor(beaconGreen)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("GPS Location")
-                    .font(.bitchatSystem(size: 14, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.primary)
-
-                if let accuracy = location.horizontalAccuracy {
-                    Text("±\(Int(accuracy))m accuracy")
-                        .font(.bitchatSystem(size: 12, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-    }
-
-    private func trackingDetailsGrid(location: PeerLocation) -> some View {
-        let details: [(String, String, String)] = {
-            var items: [(String, String, String)] = []
-
             // Connection type
-            let connectionIcon: String
-            switch location.transport {
-            case .ble:
-                connectionIcon = "antenna.radiowaves.left.and.right"
-            case .relay:
-                connectionIcon = "globe"
-            case .wifi:
-                connectionIcon = "wifi"
-            }
-            items.append((connectionIcon, "Connection", location.transport.rawValue.uppercased()))
+            iconValueView(icon: connectionIcon, value: location.transport.rawValue.uppercased(), color: connectionColor)
 
             // Ping
             if location.pingMs > 0 {
-                items.append(("clock", "Ping", "\(location.pingMs)ms"))
+                iconValueView(icon: "clock", value: "\(location.pingMs)ms", color: .orange)
             }
 
-            // GPS status
+            // GPS
             if location.gpsEnabled {
-                items.append(("location", "GPS", "Enabled"))
+                iconValueView(icon: "location", value: "ON", color: .green)
             }
 
-            // RSSI (signal strength)
+            // Signal strength
             if let rssi = location.rssi {
-                let signalStrength: String
-                if rssi > -50 {
-                    signalStrength = "Excellent"
-                } else if rssi > -60 {
-                    signalStrength = "Good"
-                } else if rssi > -70 {
-                    signalStrength = "Fair"
+                let signalColor: Color = rssi > -60 ? .green : (rssi > -70 ? .yellow : .red)
+                iconValueView(icon: "wifi", value: "\(rssi)", color: signalColor)
+            }
+
+            Spacer()
+        }
+    }
+
+    private func iconValueView(icon: String, value: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(color)
+            Text(value)
+                .font(.bitchatSystem(size: 11, weight: .medium, design: .monospaced))
+                .foregroundColor(.primary)
+        }
+    }
+
+    // MARK: - Favorites List (simple, no redundant counts)
+
+    private var favoritesListView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if filteredFavorites.isEmpty {
+                    Text("no favorites")
+                        .font(.bitchatSystem(size: 14, design: .monospaced))
+                        .foregroundColor(secondaryTextColor)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
                 } else {
-                    signalStrength = "Weak"
-                }
-                items.append(("wifi", "Signal", "\(signalStrength) (\(rssi)dBm)"))
-            }
-
-            return items
-        }()
-
-        return LazyVGrid(columns: [
-            GridItem(.flexible()),
-            GridItem(.flexible())
-        ], spacing: 8) {
-            ForEach(details, id: \.1) { icon, label, value in
-                HStack(spacing: 6) {
-                    Image(systemName: icon)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .frame(width: 14)
-
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(label)
-                            .font(.bitchatSystem(size: 9, design: .monospaced))
-                            .foregroundColor(.secondary)
-                        Text(value)
-                            .font(.bitchatSystem(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(.primary)
-                    }
-
-                    Spacer()
-                }
-                .padding(.vertical, 4)
-            }
-        }
-    }
-
-    // MARK: - Drawer Section (People-style UI)
-
-    private var drawerSection: some View {
-        VStack(spacing: 0) {
-            // Drawer handle
-            drawerHandle
-
-            // Header (People-style)
-            drawerHeader
-
-            // Search bar (when expanded)
-            if drawerExpanded {
-                searchBar
-            }
-
-            // Friend list
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if filteredFavorites.isEmpty {
-                        emptyStateView
-                    } else {
-                        ForEach(filteredFavorites, id: \.noiseKey) { fav in
-                            BeaconFriendRow(
-                                nickname: fav.nickname,
-                                location: fav.location,
-                                isSelected: selectedFavoriteKey == fav.noiseKey,
-                                textColor: textColor,
-                                secondaryTextColor: secondaryTextColor,
-                                colorScheme: colorScheme,
-                                onTap: {
-                                    withAnimation(.spring(response: 0.3)) {
-                                        if selectedFavoriteKey == fav.noiseKey {
-                                            selectedFavoriteKey = nil
-                                        } else {
-                                            selectFavorite(fav.noiseKey)
-                                        }
-                                    }
-                                }
-                            )
-                        }
+                    ForEach(filteredFavorites, id: \.noiseKey) { fav in
+                        favoriteRowView(fav: fav)
                     }
                 }
-                .padding(.top, 4)
             }
-        }
-        .background(backgroundColor)
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: drawerExpanded)
-    }
-
-    private var drawerHandle: some View {
-        VStack(spacing: 0) {
-            RoundedRectangle(cornerRadius: 2.5)
-                .fill(Color.gray.opacity(0.4))
-                .frame(width: 36, height: 5)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
-        }
-        .frame(maxWidth: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            withAnimation {
-                drawerExpanded.toggle()
-            }
+            .padding(.top, 4)
         }
     }
 
-    private var drawerHeader: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                Text("beacon")
-                    .font(.bitchatSystem(size: 18, design: .monospaced))
-                    .foregroundColor(textColor)
+    private func favoriteRowView(fav: FavoriteMapItem) -> some View {
+        let hasLocation = fav.location?.hasLocation == true
+        let isSelected = selectedFavoriteKey == fav.noiseKey
 
-                Spacer()
+        return Button(action: {
+            withAnimation(.spring(response: 0.3)) {
+                if selectedFavoriteKey == fav.noiseKey {
+                    selectedFavoriteKey = nil
+                } else {
+                    selectFavorite(fav.noiseKey)
+                }
             }
+        }) {
+            HStack(spacing: 4) {
+                // Connection icon
+                Image(systemName: connectionIcon(for: fav.location))
+                    .font(.bitchatSystem(size: 10))
+                    .foregroundColor(hasLocation ? textColor : secondaryTextColor)
 
-            // Active count (like "#mesh 1 active")
-            HStack(spacing: 6) {
-                if viewModel.peersWithLocationCount > 0 {
+                // Name
+                Text(fav.nickname)
+                    .font(.bitchatSystem(size: 14, design: .monospaced))
+                    .foregroundColor(hasLocation ? textColor : secondaryTextColor)
+
+                // Online indicator
+                if hasLocation {
                     Circle()
                         .fill(.green)
                         .frame(width: 6, height: 6)
                 }
-                Text("\(mutualFavoritesCount) friends")
-                    .foregroundColor(beaconGreen)
-                if viewModel.peersWithLocationCount > 0 {
-                    Text("\(viewModel.peersWithLocationCount) online")
+
+                Spacer()
+
+                // Ping time or offline
+                if hasLocation, let pingMs = fav.location?.pingMs, pingMs > 0 {
+                    Text("\(pingMs)ms")
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(secondaryTextColor)
+
+                    Image(systemName: isSelected ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(secondaryTextColor)
+                } else if !hasLocation {
+                    Text("offline")
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
                         .foregroundColor(secondaryTextColor)
                 }
             }
-            .font(.bitchatSystem(size: 12, design: .monospaced))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(isSelected ? textColor.opacity(0.1) : Color.clear)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
+        .buttonStyle(.plain)
     }
 
-    private var searchBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 14))
-                .foregroundColor(secondaryTextColor)
-
-            TextField("search friends...", text: $searchText)
-                .font(.bitchatSystem(size: 14, design: .monospaced))
-                .textFieldStyle(.plain)
-                .foregroundColor(textColor)
-
-            if !searchText.isEmpty {
-                Button(action: { searchText = "" }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(secondaryTextColor)
-                }
-                .buttonStyle(.plain)
-            }
+    private func connectionIcon(for location: PeerLocation?) -> String {
+        guard let loc = location, loc.hasLocation == true else {
+            return "circle.dashed"
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.gray.opacity(0.1))
-        .cornerRadius(8)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
-    }
-
-    private var emptyStateView: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("no mutual favorites nearby")
-                .font(.bitchatSystem(size: 14, design: .monospaced))
-                .foregroundColor(secondaryTextColor)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
+        if loc.uwbDistance != nil {
+            return "wave.3.right"
+        }
+        switch loc.transport {
+        case .ble:
+            return "antenna.radiowaves.left.and.right"
+        case .relay:
+            return "globe"
+        case .wifi:
+            return "wifi"
         }
     }
 
     // MARK: - Helper Functions
 
-    private func getHotColdColor(distance: Double) -> Color {
-        if distance < 1 { return .red }        // Very close - HOT
-        if distance < 3 { return .orange }     // Close - WARM
-        if distance < 10 { return .yellow }    // Medium - COOL
-        return .blue                            // Far - COLD
-    }
-
-    private func getHotColdText(distance: Double) -> String {
-        if distance < 1 { return "HOT" }
-        if distance < 3 { return "WARM" }
-        if distance < 10 { return "COOL" }
-        return "COLD"
+    private func getHotColdColor(distance: Double, hasUWB: Bool) -> Color {
+        if !hasUWB { return .green }
+        if distance < 1 { return .red }
+        if distance < 3 { return .orange }
+        if distance < 10 { return .yellow }
+        return .blue
     }
 
     private func getDirectionAngle(location: PeerLocation) -> Double {
@@ -512,17 +401,25 @@ struct BeaconView: View {
 
     private func formatDistance(_ distance: Double) -> String {
         if distance < 1 {
-            return String(format: "%.0f cm", distance * 100)
+            return String(format: "%.0fcm", distance * 100)
         } else {
-            return String(format: "%.1f m", distance)
+            return String(format: "%.1fm", distance)
+        }
+    }
+
+    private func formatStaleness(_ seconds: TimeInterval) -> String {
+        if seconds < 5 {
+            return "just now"
+        } else if seconds < 60 {
+            return "\(Int(seconds))s ago"
+        } else if seconds < 3600 {
+            return "\(Int(seconds / 60))m ago"
+        } else {
+            return "\(Int(seconds / 3600))h ago"
         }
     }
 
     // MARK: - Data
-
-    private var mutualFavoritesCount: Int {
-        favoritesService.favorites.values.filter { $0.isMutual }.count
-    }
 
     private var allFavorites: [FavoriteMapItem] {
         favoritesService.favorites
@@ -556,12 +453,10 @@ struct BeaconView: View {
     }
 
     private func getLocation(for noiseKey: Data) -> PeerLocation? {
-        // Try normalized key first (hex string)
         let hexKey = noiseKey.hexEncodedString()
         if let loc = viewModel.trackingService.peerLocations[hexKey] {
             return loc
         }
-        // Try peer ID string
         let peerIDString = PeerID(publicKey: noiseKey).id
         return viewModel.trackingService.peerLocations[peerIDString]
     }
@@ -571,7 +466,6 @@ struct BeaconView: View {
     private func selectFavorite(_ noiseKey: Data) {
         selectedFavoriteKey = noiseKey
 
-        // Zoom to this person on map
         if let location = getLocation(for: noiseKey),
            let coord = location.coordinate {
             viewModel.mapRegion.center = coord
@@ -580,7 +474,6 @@ struct BeaconView: View {
     }
 
     private func startTracking() {
-        // Configure tracking service with transports
         viewModel.trackingService.configure(
             ble: chatViewModel.meshService,
             nostr: chatViewModel.nostrTransport
@@ -588,12 +481,10 @@ struct BeaconView: View {
 
         viewModel.locationManager.beginTrackingMode()
         viewModel.trackingService.startLocationAnnouncements()
-
-        // Refresh npub exchange
         chatViewModel.refreshFavoriteNpubExchange()
 
-        // Auto-ping if we have favorites
-        if mutualFavoritesCount > 0 {
+        let favCount = favoritesService.favorites.values.filter { $0.isMutual }.count
+        if favCount > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 viewModel.pingAll()
             }
@@ -601,7 +492,7 @@ struct BeaconView: View {
     }
 }
 
-// MARK: - Map Item
+// MARK: - Supporting Views
 
 struct FavoriteMapItem: Identifiable {
     let noiseKey: Data
@@ -615,8 +506,6 @@ struct FavoriteMapItem: Identifiable {
     }
 }
 
-// MARK: - Map Pin
-
 struct BeaconMapPin: View {
     let nickname: String
     let isSelected: Bool
@@ -629,7 +518,6 @@ struct BeaconMapPin: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            // Name + tracking method
             HStack(spacing: 4) {
                 Image(systemName: hasUWB ? "wave.3.right" : (transport == .ble ? "antenna.radiowaves.left.and.right" : "globe"))
                     .font(.system(size: 9))
@@ -643,7 +531,6 @@ struct BeaconMapPin: View {
             .clipShape(Capsule())
             .shadow(color: pinColor.opacity(0.5), radius: isSelected ? 8 : 4)
 
-            // Pin
             Circle()
                 .fill(pinColor)
                 .frame(width: isSelected ? 24 : 18, height: isSelected ? 24 : 18)
@@ -652,113 +539,6 @@ struct BeaconMapPin: View {
         }
         .scaleEffect(isSelected ? 1.1 : 1.0)
         .animation(.spring(response: 0.3), value: isSelected)
-    }
-}
-
-// MARK: - Friend Row (People-style with tracking info)
-
-struct BeaconFriendRow: View {
-    let nickname: String
-    let location: PeerLocation?
-    let isSelected: Bool
-    let textColor: Color
-    let secondaryTextColor: Color
-    let colorScheme: ColorScheme
-    let onTap: () -> Void
-
-    private var hasLocation: Bool {
-        location?.hasLocation == true
-    }
-
-    private var hasUWB: Bool {
-        location?.uwbDistance != nil
-    }
-
-    private var connectionIcon: String {
-        if hasUWB {
-            return "wave.3.right"
-        } else if let loc = location {
-            switch loc.transport {
-            case .ble:
-                return "antenna.radiowaves.left.and.right"
-            case .relay:
-                return "globe"
-            case .wifi:
-                return "wifi"
-            }
-        }
-        return "circle.dashed"
-    }
-
-    private var iconColor: Color {
-        if !hasLocation {
-            return secondaryTextColor
-        }
-        if hasUWB {
-            return .blue
-        }
-        if location?.transport == .ble {
-            return textColor
-        }
-        return .purple
-    }
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 4) {
-                // Connection icon (like antenna icon in People)
-                Image(systemName: connectionIcon)
-                    .font(.bitchatSystem(size: 10))
-                    .foregroundColor(iconColor)
-
-                // Nickname
-                Text(nickname)
-                    .font(.bitchatSystem(size: 14, design: .monospaced))
-                    .foregroundColor(hasLocation ? textColor : secondaryTextColor)
-
-                // Online indicator (like verified badge in People)
-                if hasLocation {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 6, height: 6)
-                }
-
-                Spacer()
-
-                // Tracking details
-                if hasLocation {
-                    HStack(spacing: 6) {
-                        // UWB distance
-                        if let distance = location?.uwbDistance {
-                            Text(String(format: "%.1fm", distance))
-                                .font(.bitchatSystem(size: 11, design: .monospaced))
-                                .foregroundColor(.blue)
-                        }
-
-                        // Ping time
-                        if let pingMs = location?.pingMs, pingMs > 0 {
-                            Text("\(pingMs)ms")
-                                .font(.bitchatSystem(size: 11, design: .monospaced))
-                                .foregroundColor(secondaryTextColor)
-                        }
-                    }
-
-                    // Selection indicator
-                    Image(systemName: isSelected ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(secondaryTextColor)
-                } else {
-                    Text("offline")
-                        .font(.bitchatSystem(size: 11, design: .monospaced))
-                        .foregroundColor(secondaryTextColor)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(isSelected ? textColor.opacity(0.1) : Color.clear)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 }
 
