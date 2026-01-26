@@ -21,7 +21,8 @@ struct CommandSuggestionsView: View {
         guard messageText.hasPrefix("/") && !messageText.contains(" ") else { return [] }
         let isGeoPublic = locationManager.selectedChannel.isLocation
         let isGeoDM = viewModel.selectedPrivateChatPeer?.isGeoDM == true
-        return CommandInfo.all(isGeoPublic: isGeoPublic, isGeoDM: isGeoDM).filter { command in
+        let isPrivateChat = viewModel.selectedPrivateChatPeer != nil
+        return CommandInfo.all(isGeoPublic: isGeoPublic, isGeoDM: isGeoDM, isPrivateChat: isPrivateChat).filter { command in
             command.alias.starts(with: messageText.lowercased())
         }
     }

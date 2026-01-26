@@ -160,6 +160,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
 
     let commandProcessor: CommandProcessor
     let messageRouter: MessageRouter
+    let nostrTransport: NostrTransport
     let privateChatManager: PrivateChatManager
     let unifiedPeerService: UnifiedPeerService
     let autocompleteService: AutocompleteService
@@ -431,7 +432,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         self.commandProcessor = CommandProcessor(identityManager: identityManager)
         self.privateChatManager = PrivateChatManager(meshService: meshService)
         self.unifiedPeerService = UnifiedPeerService(meshService: meshService, idBridge: idBridge, identityManager: identityManager)
-        let nostrTransport = NostrTransport(keychain: keychain, idBridge: idBridge)
+        self.nostrTransport = NostrTransport(keychain: keychain, idBridge: idBridge)
         nostrTransport.senderPeerID = meshService.myPeerID
         self.messageRouter = MessageRouter(transports: [meshService, nostrTransport])
         // Route receipts from PrivateChatManager through MessageRouter
@@ -543,14 +544,17 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
 
         // Resubscribe geohash on relay reconnect
         if let relayMgr = self.nostrRelayManager {
+            SecureLogger.debug("📋 ChatViewModel: Subscribing to relay connection state", category: .session)
             relayMgr.$isConnected
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] connected in
                     guard let self = self else { return }
+                    SecureLogger.debug("📋 ChatViewModel: Relay isConnected = \(connected), handlersSetup = \(self.nostrHandlersSetup)", category: .session)
                     if connected {
                         Task { @MainActor in
                             // Set up DM handler once on first connect
                             if !self.nostrHandlersSetup {
+                                SecureLogger.info("📋 ChatViewModel: Relay connected, setting up Nostr message handling", category: .session)
                                 self.setupNostrMessageHandling()
                                 self.nostrHandlersSetup = true
                             }
@@ -561,6 +565,8 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
                     }
                 }
                 .store(in: &self.cancellables)
+        } else {
+            SecureLogger.warning("📋 ChatViewModel: nostrRelayManager is nil, cannot subscribe to connection state", category: .session)
         }
 
         // Set up Noise encryption callbacks
@@ -730,7 +736,7 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         )
         #endif
     }
-    
+
     // MARK: - Deinitialization
     
     deinit {
@@ -902,8 +908,33 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
                 return peer.isFavorite
             }
         }
-        
+
         return false
+    }
+
+    /// Resend favorite notifications to all mutual favorites to refresh npub exchange
+    /// Call this when BLE-connected to update npub for existing favorites
+    @MainActor
+    func refreshFavoriteNpubExchange() {
+        let missingNpub = FavoritesPersistenceService.shared.getMutualFavoritesMissingNpub()
+        guard !missingNpub.isEmpty else {
+            SecureLogger.info("✅ All mutual favorites have npub - no refresh needed", category: .session)
+            return
+        }
+
+        SecureLogger.info("🔄 Refreshing npub exchange for \(missingNpub.count) mutual favorites", category: .session)
+
+        for relationship in missingNpub {
+            let peerID = PeerID(publicKey: relationship.peerNoisePublicKey)
+
+            // Check if peer is reachable via BLE
+            if meshService.isPeerReachable(peerID) {
+                SecureLogger.info("📤 Resending favorite notification to \(relationship.peerNickname) via BLE", category: .session)
+                meshService.sendFavoriteNotification(to: peerID, isFavorite: true)
+            } else {
+                SecureLogger.warning("⚠️ Cannot refresh npub for \(relationship.peerNickname) - not BLE reachable", category: .session)
+            }
+        }
     }
     
     // MARK: - Public Key and Identity Management
@@ -2811,7 +2842,40 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
     func getFingerprint(for peerID: PeerID) -> String? {
         return unifiedPeerService.getFingerprint(for: peerID)
     }
-    
+
+    /// Find the current peerID for a given fingerprint (used for tracking across reconnections)
+    @MainActor
+    func getPeerID(for fingerprint: String) -> PeerID? {
+        // First check if the current private chat peer matches this fingerprint
+        if let currentPeer = selectedPrivateChatPeer,
+           let currentFingerprint = unifiedPeerService.getFingerprint(for: currentPeer),
+           currentFingerprint == fingerprint {
+            return currentPeer
+        }
+
+        // Search through unifiedPeerService's peers directly (most up-to-date source)
+        for peer in unifiedPeerService.peers {
+            if let peerFingerprint = unifiedPeerService.getFingerprint(for: peer.peerID),
+               peerFingerprint == fingerprint {
+                return peer.peerID
+            }
+        }
+
+        // Also check local fingerprint cache as fallback
+        for (peerID, mappedFingerprint) in peerIDToPublicKeyFingerprint {
+            if mappedFingerprint == fingerprint {
+                return peerID
+            }
+        }
+        return nil
+    }
+
+    /// Check if a peer with the given fingerprint is currently connected
+    @MainActor
+    func isPeerConnected(fingerprint: String) -> Bool {
+        return getPeerID(for: fingerprint) != nil
+    }
+
     /// Check if fingerprint is verified using our persisted data
     @MainActor
     private func encryptionStatus(for peerID: PeerID) -> EncryptionStatus {
@@ -3169,6 +3233,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
                         updateEncryptionStatus(for: peerID)
                     }
                 }
+            // Tracking payloads are handled directly in BLEService
+            case .trackRequest, .trackResponse, .locationAnnounce:
+                break
             }
         }
     }

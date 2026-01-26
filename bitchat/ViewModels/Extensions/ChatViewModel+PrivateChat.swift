@@ -43,10 +43,20 @@ extension ChatViewModel {
         }
         
         // Determine routing method and recipient nickname
-        guard let noiseKey = Data(hexString: peerID.id) else { return }
+        // Handle both short peer IDs (16 hex) and full Noise keys (64 hex)
+        let noiseKey = Data(hexString: peerID.id)
         let isConnected = meshService.isPeerConnected(peerID)
         let isReachable = meshService.isPeerReachable(peerID)
-        let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey)
+
+        // Look up favorite status - try full key first, then short ID
+        let favoriteStatus: FavoritesPersistenceService.FavoriteRelationship?
+        if let key = noiseKey, key.count == 32 {
+            favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: key)
+        } else if peerID.isShort {
+            favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(forPeerID: peerID)
+        } else {
+            favoriteStatus = nil
+        }
         let isMutualFavorite = favoriteStatus?.isMutual ?? false
         let hasNostrKey = favoriteStatus?.peerNostrPublicKey != nil
         
@@ -84,10 +94,23 @@ extension ChatViewModel {
         // Trigger UI update for sent message
         objectWillChange.send()
         
-        // Send via appropriate transport (BLE if connected/reachable, else Nostr when possible)
-        if isConnected || isReachable || (isMutualFavorite && hasNostrKey) {
+        // Send via appropriate transport
+        // Priority: BLE connected > Nostr (mutual favorite) > BLE reachable (retention)
+        if isConnected {
+            // Directly connected via BLE - use mesh
             messageRouter.sendPrivate(content, to: peerID, recipientNickname: recipientNickname ?? "user", messageID: messageID)
-            // Optimistically mark as sent for both transports; delivery/read will update subsequently
+            if let idx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                privateChats[peerID]?[idx].deliveryStatus = .sent
+            }
+        } else if isMutualFavorite && hasNostrKey {
+            // Offline mutual favorite with known Nostr key - prefer Nostr relay
+            nostrTransport.sendPrivateMessage(content, to: peerID, recipientNickname: recipientNickname ?? "user", messageID: messageID)
+            if let idx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
+                privateChats[peerID]?[idx].deliveryStatus = .sent
+            }
+        } else if isReachable {
+            // BLE retention window but not nostr-reachable - try mesh routing
+            messageRouter.sendPrivate(content, to: peerID, recipientNickname: recipientNickname ?? "user", messageID: messageID)
             if let idx = privateChats[peerID]?.firstIndex(where: { $0.id == messageID }) {
                 privateChats[peerID]?[idx].deliveryStatus = .sent
             }
@@ -201,7 +224,7 @@ extension ChatViewModel {
         guard let pm = PrivateMessagePacket.decode(from: payload.data) else { return }
         let messageId = pm.messageID
         
-        SecureLogger.info("GeoDM: recv PM <- sender=\(senderPubkey.prefix(8))… mid=\(messageId.prefix(8))…", category: .session)
+        SecureLogger.info("GeoDM: recv PM <- sender=\(senderPubkey.prefix(8))… mid=\(messageId.prefix(8))… convKey=\(convKey.id) content=\(pm.content.prefix(20))…", category: .session)
 
         sendDeliveryAckIfNeeded(to: messageId, senderPubKey: senderPubkey, from: id)
 
@@ -233,10 +256,13 @@ extension ChatViewModel {
         
         if privateChats[convKey] == nil {
             privateChats[convKey] = []
+            SecureLogger.info("GeoDM: Created NEW conversation for convKey=\(convKey.id)", category: .session)
         }
         privateChats[convKey]?.append(msg)
-        
+        SecureLogger.info("GeoDM: Stored message in convKey=\(convKey.id), chat now has \(privateChats[convKey]?.count ?? 0) messages", category: .session)
+
         let isViewing = selectedPrivateChatPeer == convKey
+        SecureLogger.info("GeoDM: selectedPrivateChatPeer=\(selectedPrivateChatPeer?.id ?? "nil"), isViewing=\(isViewing)", category: .session)
         let wasReadBefore = sentReadReceipts.contains(messageId)
         let isRecentMessage = Date().timeIntervalSince(messageTimestamp) < 30
         let shouldMarkUnread = !wasReadBefore && !isViewing && isRecentMessage

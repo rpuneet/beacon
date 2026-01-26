@@ -46,10 +46,17 @@ final class UnifiedPeerService: ObservableObject, TransportPeerEventsDelegate {
         
         // Subscribe to changes from both services
         setupSubscriptions()
-        
+
         // Perform initial update
         Task { @MainActor in
             updatePeers()
+        }
+
+        // Auto-resync npubs with mutual favorites after startup delay
+        // This ensures npubs stay in sync even if identity changed
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)  // 5 second delay
+            resyncNpubsWithMutualFavorites()
         }
     }
     
@@ -109,7 +116,8 @@ final class UnifiedPeerService: ObservableObject, TransportPeerEventsDelegate {
         
         // Phase 2: Add offline favorites that we actively favorite
         for (favoriteKey, favorite) in favorites where favorite.isFavorite {
-            let peerID = PeerID(hexData: favoriteKey)
+            // Use publicKey init to get the short 16-char peerID (same as mesh peers)
+            let peerID = PeerID(publicKey: favoriteKey)
             
             // Skip if already added (connected peer)
             if addedPeerIDs.contains(peerID) { continue }
@@ -344,8 +352,34 @@ final class UnifiedPeerService: ObservableObject, TransportPeerEventsDelegate {
         return nil
     }
     
+    // MARK: - Npub Resync
+
+    /// Resync npubs with all mutual favorites by re-sending favorite notifications
+    /// This updates the stored npub on the receiving side to match current identity
+    func resyncNpubsWithMutualFavorites() {
+        let mutuals = mutualFavorites
+        SecureLogger.info("🔄 Resyncing npubs with \(mutuals.count) mutual favorites", category: .session)
+
+        for peer in mutuals {
+            SecureLogger.info("🔄 Sending favorite notification to \(peer.displayName) to sync npub", category: .session)
+
+            // Re-send favorite notification (includes our current npub)
+            if let router = messageRouter {
+                router.sendFavoriteNotification(to: peer.peerID, isFavorite: true)
+            } else {
+                meshService.sendFavoriteNotification(to: peer.peerID, isFavorite: true)
+            }
+        }
+
+        if mutuals.isEmpty {
+            SecureLogger.info("🔄 No mutual favorites to resync", category: .session)
+        } else {
+            SecureLogger.info("🔄 Npub resync sent to \(mutuals.count) mutual favorites", category: .session)
+        }
+    }
+
     // MARK: - Compatibility Methods (for easy migration)
-    
+
     var allPeers: [BitchatPeer] { peers }
     var connectedPeers: Set<PeerID> { connectedPeerIDs }
     var favoritePeers: Set<String> {

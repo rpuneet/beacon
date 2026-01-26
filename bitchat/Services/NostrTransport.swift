@@ -26,15 +26,23 @@ final class NostrTransport: Transport, @unchecked Sendable {
     init(keychain: KeychainManagerProtocol, idBridge: NostrIdentityBridge) {
         self.keychain = keychain
         self.idBridge = idBridge
-        
+
         setupObservers()
-        
+
         // Synchronously warm the cache to avoid startup race
         let favorites = FavoritesPersistenceService.shared.favorites
+        SecureLogger.info("NostrTransport: Init - \(favorites.count) favorites loaded", category: .session)
+
         let reachable = favorites.values
             .filter { $0.peerNostrPublicKey != nil }
             .map { PeerID(publicKey: $0.peerNoisePublicKey) }
-            
+
+        SecureLogger.info("NostrTransport: Init - \(reachable.count) peers have npub (relay-reachable)", category: .session)
+        for rel in favorites.values {
+            let hasNpub = rel.peerNostrPublicKey != nil
+            SecureLogger.debug("NostrTransport: Init - \(rel.peerNickname): npub=\(hasNpub ? rel.peerNostrPublicKey!.prefix(20) + "..." : "NONE")", category: .session)
+        }
+
         queue.sync(flags: .barrier) {
             self.reachablePeers = Set(reachable)
         }
@@ -53,10 +61,20 @@ final class NostrTransport: Transport, @unchecked Sendable {
     private func refreshReachablePeers() {
         Task { @MainActor in
             let favorites = FavoritesPersistenceService.shared.favorites
+
+            // Log detailed reachability info
+            SecureLogger.debug("NostrTransport: Refreshing reachable peers from \(favorites.count) favorites", category: .session)
+            for (_, rel) in favorites {
+                let hasNpub = rel.peerNostrPublicKey != nil
+                SecureLogger.debug("  - \(rel.peerNickname): mutual=\(rel.isMutual), hasNpub=\(hasNpub)", category: .session)
+            }
+
             let reachable = favorites.values
                 .filter { $0.peerNostrPublicKey != nil }
                 .map { PeerID(publicKey: $0.peerNoisePublicKey) }
-            
+
+            SecureLogger.info("NostrTransport: \(reachable.count) peers reachable via relay", category: .session)
+
             self.queue.async(flags: .barrier) { [weak self] in
                 self?.reachablePeers = Set(reachable)
             }
@@ -118,9 +136,19 @@ final class NostrTransport: Transport, @unchecked Sendable {
 
     func sendPrivateMessage(_ content: String, to peerID: PeerID, recipientNickname: String, messageID: String) {
         Task { @MainActor in
-            guard let recipientNpub = resolveRecipientNpub(for: peerID),
-                  let recipientHex = npubToHex(recipientNpub),
-                  let senderIdentity = try? idBridge.getCurrentNostrIdentity() else { return }
+            // Debug: Log which guard conditions pass/fail
+            let recipientNpub = resolveRecipientNpub(for: peerID)
+            let recipientHex = recipientNpub.flatMap { npubToHex($0) }
+            let senderIdentity = try? idBridge.getCurrentNostrIdentity()
+
+            SecureLogger.debug("NostrTransport: sendPrivateMessage to \(peerID.id.prefix(16)) - npub: \(recipientNpub != nil), hex: \(recipientHex != nil), identity: \(senderIdentity != nil)", category: .session)
+
+            guard let recipientNpub = recipientNpub,
+                  let recipientHex = recipientHex,
+                  let senderIdentity = senderIdentity else {
+                SecureLogger.warning("NostrTransport: cannot send PM - missing: npub=\(recipientNpub == nil), hex=\(recipientHex == nil), identity=\(senderIdentity == nil)", category: .session)
+                return
+            }
             SecureLogger.debug("NostrTransport: preparing PM to \(recipientNpub.prefix(16))… id=\(messageID.prefix(8))…", category: .session)
             guard let embedded = NostrEmbeddedBitChat.encodePMForNostr(content: content, messageID: messageID, recipientPeerID: peerID, senderPeerID: senderPeerID) else {
                 SecureLogger.error("NostrTransport: failed to embed PM packet", category: .session)
@@ -155,6 +183,159 @@ final class NostrTransport: Transport, @unchecked Sendable {
     }
 
     func sendBroadcastAnnounce() { /* no-op for Nostr */ }
+
+    // MARK: - Tracking
+
+    // Pending track requests for response correlation
+    private var pendingTrackRequests: [String: (peerID: PeerID, sentAt: Date, completion: (Result<(response: TrackResponse, pingMs: Int, rssi: Int?), Error>) -> Void)] = [:]
+    private let trackQueue = DispatchQueue(label: "nostr.transport.tracking", attributes: .concurrent)
+
+    func sendTrackRequest(to peerID: PeerID, completion: @escaping (Result<(response: TrackResponse, pingMs: Int, rssi: Int?), Error>) -> Void) {
+        Task { @MainActor in
+            let recipientNpub = resolveRecipientNpub(for: peerID)
+            let recipientHex = recipientNpub.flatMap { npubToHex($0) }
+            let senderIdentity = try? idBridge.getCurrentNostrIdentity()
+
+            SecureLogger.debug("NostrTransport: sendTrackRequest to \(peerID.id.prefix(16)) - npub: \(recipientNpub != nil), hex: \(recipientHex != nil), identity: \(senderIdentity != nil)", category: .session)
+
+            guard let recipientNpub = recipientNpub,
+                  let recipientHex = recipientHex,
+                  let _ = senderIdentity else {
+                SecureLogger.warning("NostrTransport: cannot send TrackRequest - missing: npub=\(recipientNpub == nil), hex=\(recipientHex == nil), identity=\(senderIdentity == nil)", category: .session)
+                completion(.failure(TrackingError.peerNotConnected))
+                return
+            }
+
+            sendTrackRequestToHex(recipientHex: recipientHex, peerID: peerID, completion: completion)
+        }
+    }
+
+    /// Send track request using the peer's Noise public key directly (avoids short ID format mismatch)
+    func sendTrackRequest(to peerID: PeerID, noisePublicKey: Data, completion: @escaping (Result<(response: TrackResponse, pingMs: Int, rssi: Int?), Error>) -> Void) {
+        Task { @MainActor in
+            // Look up npub directly from favorites using the Noise key
+            let favoriteStatus = FavoritesPersistenceService.shared.getFavoriteStatus(for: noisePublicKey)
+            let recipientNpub = favoriteStatus?.peerNostrPublicKey
+            let recipientHex = recipientNpub.flatMap { npubToHex($0) }
+            let senderIdentity = try? idBridge.getCurrentNostrIdentity()
+
+            SecureLogger.info("NostrTransport: sendTrackRequest(noiseKey) to \(peerID.id.prefix(16)) - npub=\(recipientNpub ?? "NONE") hex=\(recipientHex?.prefix(16) ?? "NONE")", category: .session)
+
+            guard let _ = favoriteStatus,
+                  let recipientNpub = recipientNpub,
+                  let recipientHex = recipientHex,
+                  let _ = senderIdentity else {
+                SecureLogger.warning("NostrTransport: cannot send TrackRequest(noiseKey) - missing: fav=\(favoriteStatus == nil), npub=\(recipientNpub == nil), hex=\(recipientHex == nil), identity=\(senderIdentity == nil)", category: .session)
+                completion(.failure(TrackingError.peerNotConnected))
+                return
+            }
+
+            sendTrackRequestToHex(recipientHex: recipientHex, peerID: peerID, completion: completion)
+        }
+    }
+
+    private func sendTrackRequestToHex(recipientHex: String, peerID: PeerID, completion: @escaping (Result<(response: TrackResponse, pingMs: Int, rssi: Int?), Error>) -> Void) {
+        Task { @MainActor in
+            guard let senderIdentity = try? idBridge.getCurrentNostrIdentity() else {
+                completion(.failure(TrackingError.peerNotConnected))
+                return
+            }
+
+            // Create track request (no UWB over relay - that requires physical proximity)
+            let request = TrackRequest(uwbToken: nil)
+
+            SecureLogger.debug("NostrTransport: preparing TrackRequest to \(recipientHex.prefix(16))… id=\(request.id.prefix(8))…", category: .session)
+
+            guard let embedded = NostrEmbeddedBitChat.encodeTrackRequestForNostr(
+                request: request,
+                recipientPeerID: peerID,
+                senderPeerID: senderPeerID
+            ) else {
+                SecureLogger.error("NostrTransport: failed to embed TrackRequest packet", category: .session)
+                completion(.failure(TrackingError.notSupported))
+                return
+            }
+
+            // Store pending request for response correlation (record send time)
+            let sentAt = Date()
+            trackQueue.async(flags: .barrier) { [weak self] in
+                self?.pendingTrackRequests[request.id] = (peerID: peerID, sentAt: sentAt, completion: completion)
+                let count = self?.pendingTrackRequests.count ?? 0
+                SecureLogger.debug("📍 NostrTransport: Stored pending TrackRequest id=\(request.id.prefix(8))… total pending=\(count)", category: .session)
+            }
+
+            // Send the message FIRST
+            sendWrappedMessage(content: embedded, recipientHex: recipientHex, senderIdentity: senderIdentity)
+
+            // THEN schedule timeout (15 seconds for relay - longer than BLE due to internet latency)
+            // This prevents false timeouts from the timeout firing before the message is even sent
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15.0) { [weak self] in
+                self?.trackQueue.async(flags: .barrier) {
+                    if let pending = self?.pendingTrackRequests.removeValue(forKey: request.id) {
+                        DispatchQueue.main.async {
+                            pending.completion(.failure(TrackingError.timeout))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Location Announcements
+
+    /// Send periodic location announcement via Nostr relay
+    @MainActor
+    func sendLocationAnnounce(_ announce: LocationAnnounce, to peerID: PeerID, noisePublicKey: Data) {
+        guard let recipientNpub = FavoritesPersistenceService.shared.getFavoriteStatus(for: noisePublicKey)?.peerNostrPublicKey,
+              let recipientHex = npubToHex(recipientNpub) else {
+            SecureLogger.debug("NostrTransport: Cannot send location announce - no npub for peer", category: .session)
+            return
+        }
+
+        // Encode as Nostr message with LOCATION: prefix
+        let payload = "LOCATION:\(announce.toBinaryData().base64EncodedString())"
+
+        Task { @MainActor in
+            guard let identity = try? idBridge.getCurrentNostrIdentity() else {
+                SecureLogger.warning("NostrTransport: Cannot send location announce - no identity", category: .session)
+                return
+            }
+            sendWrappedMessage(content: payload, recipientHex: recipientHex, senderIdentity: identity, registerPending: false)
+            SecureLogger.debug("📍 Sent location announce via relay to \(peerID.id.prefix(8))", category: .session)
+        }
+    }
+
+    /// Handle incoming location announcement (called when parsing Nostr messages)
+    func handleLocationAnnounce(from senderPeerID: PeerID, announce: LocationAnnounce) {
+        Task { @MainActor in
+            TrackingService.shared.handleLocationAnnounce(from: senderPeerID, announce: announce, transport: .relay)
+        }
+    }
+
+    /// Handle incoming TrackResponse from peer (called by ChatViewModel when processing Nostr messages)
+    func handleTrackResponse(_ response: TrackResponse) {
+        let hasLocation = response.gpsEnabled && response.latitude != nil
+        SecureLogger.info("📍 NostrTransport: handleTrackResponse requestID=\(response.requestID.prefix(8))… hasLocation=\(hasLocation)", category: .session)
+
+        trackQueue.async(flags: .barrier) { [weak self] in
+            // Log current pending requests for debugging
+            let pendingCount = self?.pendingTrackRequests.count ?? 0
+            let pendingIDs = self?.pendingTrackRequests.keys.map { $0.prefix(8) }.joined(separator: ", ") ?? "none"
+            SecureLogger.debug("📍 NostrTransport: \(pendingCount) pending requests: [\(pendingIDs)]", category: .session)
+
+            guard let pending = self?.pendingTrackRequests.removeValue(forKey: response.requestID) else {
+                SecureLogger.warning("📍 NostrTransport: received TrackResponse with no pending request: \(response.requestID.prefix(8))…", category: .session)
+                return
+            }
+            let pingMs = Int(Date().timeIntervalSince(pending.sentAt) * 1000)
+            SecureLogger.info("📍 NostrTransport: TrackResponse matched! RTT=\(pingMs)ms for peer=\(pending.peerID.id.prefix(16))", category: .session)
+            // No RSSI available over relay (that requires BLE)
+            DispatchQueue.main.async {
+                pending.completion(.success((response: response, pingMs: pingMs, rssi: nil)))
+            }
+        }
+    }
+
     func sendDeliveryAck(for messageID: String, to peerID: PeerID) {
         Task { @MainActor in
             guard let recipientNpub = resolveRecipientNpub(for: peerID),
@@ -224,6 +405,9 @@ extension NostrTransport {
     /// Creates and sends a gift-wrapped private message event
     @MainActor
     private func sendWrappedMessage(content: String, recipientHex: String, senderIdentity: NostrIdentity, registerPending: Bool = false) {
+        let relayStatus = NostrRelayManager.shared.humanReadableStatus
+        SecureLogger.info("NostrTransport: sendWrappedMessage - relay status: \(relayStatus), recipientHex (full): \(recipientHex)", category: .session)
+
         guard let event = try? NostrProtocol.createPrivateMessage(content: content, recipientPubkey: recipientHex, senderIdentity: senderIdentity) else {
             SecureLogger.error("NostrTransport: failed to build Nostr event", category: .session)
             return
@@ -231,6 +415,7 @@ extension NostrTransport {
         if registerPending {
             NostrRelayManager.registerPendingGiftWrap(id: event.id)
         }
+        SecureLogger.debug("NostrTransport: sending event \(event.id.prefix(16))… to relays", category: .session)
         NostrRelayManager.shared.sendEvent(event)
     }
 
@@ -270,16 +455,51 @@ extension NostrTransport {
 
     @MainActor
     private func resolveRecipientNpub(for peerID: PeerID) -> String? {
-        if let noiseKey = Data(hexString: peerID.id),
-           let fav = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey),
-           let npub = fav.peerNostrPublicKey {
-            return npub
+        SecureLogger.debug("NostrTransport: resolveRecipientNpub for peerID=\(peerID.id.prefix(16)), idLen=\(peerID.id.count)", category: .session)
+
+        // Try to parse as Noise key (full hex)
+        if let noiseKey = Data(hexString: peerID.id) {
+            let fav = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey)
+            SecureLogger.debug("NostrTransport: lookup by noiseKey - found: \(fav != nil), hasNpub: \(fav?.peerNostrPublicKey != nil)", category: .session)
+            if let npub = fav?.peerNostrPublicKey {
+                return npub
+            }
         }
-        if peerID.id.count == 16,
-           let fav = FavoritesPersistenceService.shared.getFavoriteStatus(forPeerID: peerID),
-           let npub = fav.peerNostrPublicKey {
-            return npub
+
+        // Try to lookup by short peerID
+        if peerID.id.count == 16 {
+            let fav = FavoritesPersistenceService.shared.getFavoriteStatus(forPeerID: peerID)
+            SecureLogger.debug("NostrTransport: lookup by shortPeerID - found: \(fav != nil), hasNpub: \(fav?.peerNostrPublicKey != nil)", category: .session)
+            if let npub = fav?.peerNostrPublicKey {
+                SecureLogger.info("NostrTransport: RESOLVED recipient npub from favorites: \(npub)", category: .session)
+                return npub
+            }
         }
+
+        SecureLogger.warning("NostrTransport: could not resolve npub for peerID=\(peerID.id.prefix(16))", category: .session)
         return nil
+    }
+}
+
+// MARK: - TransportMetadata Conformance
+
+extension NostrTransport: TransportMetadata {
+    var transportName: String { "Public Relay" }
+
+    var priority: Int { 40 }  // Lowest priority - public relay fallback
+
+    var requiresInternet: Bool { true }
+
+    var isDirectConnection: Bool { false }
+
+    nonisolated var connectionStatus: TransportConnectionStatus {
+        // Use reachable peers count as a proxy for connection status
+        // This avoids MainActor requirement while providing useful info
+        let peerCount = queue.sync { reachablePeers.count }
+        if peerCount > 0 {
+            return .connected(peerCount: peerCount)
+        } else {
+            return .disconnected
+        }
     }
 }

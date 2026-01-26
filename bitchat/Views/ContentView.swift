@@ -27,6 +27,39 @@ private struct MessageDisplayItem: Identifiable {
     let message: BitchatMessage
 }
 
+// MARK: - Tracking Button Content
+
+private struct TrackingButtonContent: View {
+    @ObservedObject private var trackingService = TrackingService.shared
+    @ObservedObject private var favoritesService = FavoritesPersistenceService.shared
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var textColor: Color {
+        colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
+    }
+
+    private var activeCount: Int {
+        trackingService.peerLocations.values.filter { $0.hasLocation }.count
+    }
+
+    private var totalCount: Int {
+        favoritesService.mutualFavorites.count
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "star.fill")
+                .font(.system(size: 14))
+            if totalCount > 0 {
+                Text("\(activeCount)/\(totalCount)")
+                    .font(.bitchatSystem(size: 10, design: .monospaced))
+            }
+        }
+        .foregroundColor(activeCount > 0 ? .green : (totalCount > 0 ? .yellow : .yellow.opacity(0.5)))
+        .frame(minWidth: 24, minHeight: 24)
+    }
+}
+
 // MARK: - Main Content View
 
 struct ContentView: View {
@@ -52,10 +85,12 @@ struct ContentView: View {
     @State private var scrollThrottleTimer: Timer?
     @State private var autocompleteDebounceTimer: Timer?
     @State private var showLocationChannelsSheet = false
+    @State private var showGroupTrackingSheet = false
     @State private var showVerifySheet = false
     @State private var expandedMessageIDs: Set<String> = []
     @State private var showLocationNotes = false
     @State private var notesGeohash: String? = nil
+    @State private var showTrackingSheet = false
     @State private var imagePreviewURL: URL? = nil
     @State private var recordingAlertMessage: String = ""
     @State private var showRecordingAlert = false
@@ -1000,6 +1035,16 @@ struct ContentView: View {
                                 ? String(localized: "content.accessibility.remove_favorite", comment: "Accessibility label to remove a favorite")
                                 : String(localized: "content.accessibility.add_favorite", comment: "Accessibility label to add a favorite")
                             )
+
+                            Button(action: {
+                                showTrackingSheet = true
+                            }) {
+                                Image(systemName: "location.magnifyingglass")
+                                    .font(.bitchatSystem(size: 14))
+                                    .foregroundColor(textColor)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Track peer")
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -1047,6 +1092,14 @@ struct ContentView: View {
                     }
                 }
         )
+        .sheet(isPresented: $showTrackingSheet) {
+            if let peerID = viewModel.selectedPrivateChatPeer,
+               let fingerprint = viewModel.getFingerprint(for: peerID) {
+                let nickname = viewModel.meshService.peerNickname(peerID: peerID) ?? String(peerID.id.prefix(8))
+                TrackingView(fingerprint: fingerprint, initialPeerID: peerID, nickname: nickname)
+                    .environmentObject(viewModel)
+            }
+        }
     }
 
     private func privateHeaderInfo(context: PrivateHeaderContext, privatePeerID: PeerID) -> some View {
@@ -1198,7 +1251,13 @@ struct ContentView: View {
         }
     }
 
-    
+    private func openChatFromBeacon(_ peerID: PeerID) {
+        showGroupTrackingSheet = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            viewModel.selectedPrivateChatPeer = peerID
+        }
+    }
+
     private var mainHeaderView: some View {
         HStack(spacing: 0) {
             Text(verbatim: "bitchat/")
@@ -1307,6 +1366,13 @@ struct ContentView: View {
                     )
                 }
 
+                // Group tracking button - always visible, shows star icon
+                Button(action: { showGroupTrackingSheet = true }) {
+                    TrackingButtonContent()
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "Track Favorites"))
+
                 // Location channels button '#'
                 Button(action: { showLocationChannelsSheet = true }) {
                     let badgeText: String = {
@@ -1377,6 +1443,10 @@ struct ContentView: View {
                 .environmentObject(viewModel)
                 .onAppear { viewModel.isLocationChannelsSheetPresented = true }
                 .onDisappear { viewModel.isLocationChannelsSheetPresented = false }
+        }
+        .sheet(isPresented: $showGroupTrackingSheet) {
+            BeaconSheetView(onOpenChat: openChatFromBeacon)
+                .environmentObject(viewModel)
         }
         .sheet(isPresented: $showLocationNotes, onDismiss: {
             notesGeohash = nil

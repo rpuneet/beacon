@@ -170,10 +170,59 @@ final class FavoritesPersistenceService: ObservableObject {
     func isMutualFavorite(_ peerNoisePublicKey: Data) -> Bool {
         favorites[peerNoisePublicKey]?.isMutual ?? false
     }
+
+    /// Update a peer's nickname (called when we detect a nickname change over BLE)
+    func updatePeerNickname(peerNoisePublicKey: Data, newNickname: String) {
+        guard let existing = favorites[peerNoisePublicKey] else { return }
+
+        // Skip if nickname is the same 
+        guard existing.peerNickname != newNickname else { return }
+
+        SecureLogger.info("📝 Updating nickname for favorite: '\(existing.peerNickname)' -> '\(newNickname)'", category: .session)
+
+        let updated = FavoriteRelationship(
+            peerNoisePublicKey: existing.peerNoisePublicKey,
+            peerNostrPublicKey: existing.peerNostrPublicKey,
+            peerNickname: newNickname,
+            isFavorite: existing.isFavorite,
+            theyFavoritedUs: existing.theyFavoritedUs,
+            favoritedAt: existing.favoritedAt,
+            lastUpdated: Date()
+        )
+
+        favorites[peerNoisePublicKey] = updated
+        saveFavorites()
+
+        // Notify observers of the change
+        NotificationCenter.default.post(
+            name: .favoriteStatusChanged,
+            object: nil,
+            userInfo: ["peerPublicKey": peerNoisePublicKey, "nicknameUpdate": true]
+        )
+    }
     
     /// Get favorite status for a peer
     func getFavoriteStatus(for peerNoisePublicKey: Data) -> FavoriteRelationship? {
         favorites[peerNoisePublicKey]
+    }
+
+    /// Get all mutual favorites that are missing npub (can't use relay)
+    func getMutualFavoritesMissingNpub() -> [FavoriteRelationship] {
+        favorites.values.filter { $0.isMutual && $0.peerNostrPublicKey == nil }
+    }
+
+    /// Log detailed status of all favorites for debugging
+    func logFavoritesStatus() {
+        SecureLogger.info("📋 Favorites Status Report:", category: .session)
+        for (_, rel) in favorites {
+            let mutualStatus = rel.isMutual ? "MUTUAL" : (rel.isFavorite ? "we->them" : "them->us")
+            let npubStatus = rel.peerNostrPublicKey != nil ? "✅ has npub" : "❌ NO npub (relay disabled)"
+            SecureLogger.info("  - \(rel.peerNickname): \(mutualStatus), \(npubStatus)", category: .session)
+        }
+        let missingNpub = getMutualFavoritesMissingNpub()
+        if !missingNpub.isEmpty {
+            SecureLogger.warning("⚠️ \(missingNpub.count) mutual favorites missing npub - relay tracking won't work for: \(missingNpub.map { $0.peerNickname }.joined(separator: ", "))", category: .session)
+        }
     }
 
     /// Resolve favorite status by short peer ID (16-hex derived from Noise pubkey)
@@ -296,8 +345,8 @@ final class FavoritesPersistenceService: ObservableObject {
                 }
             }
             
-            // Log loaded relationships
-            // Loaded relationships successfully
+            // Log loaded relationships with npub status
+            logFavoritesStatus()
         } catch {
             SecureLogger.error("Failed to load favorites: \(error)", category: .session)
         }
@@ -308,4 +357,6 @@ final class FavoritesPersistenceService: ObservableObject {
 
 extension Notification.Name {
     static let favoriteStatusChanged = Notification.Name("FavoriteStatusChanged")
+    static let trackRequestReceived = Notification.Name("TrackRequestReceived")
+    static let uwbRetryRequested = Notification.Name("UWBRetryRequested")
 }

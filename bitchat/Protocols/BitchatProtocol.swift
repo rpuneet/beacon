@@ -108,7 +108,11 @@ enum NoisePayloadType: UInt8 {
     // Verification (QR-based OOB binding)
     case verifyChallenge = 0x10     // Verification challenge
     case verifyResponse  = 0x11     // Verification response
-    
+    // Tracking (request/response for GPS, ping, and UWB measurement)
+    case trackRequest = 0x20        // Tracking request (get GPS + optional UWB token)
+    case trackResponse = 0x21       // Tracking response (GPS data + optional UWB token)
+    case locationAnnounce = 0x30    // Periodic location broadcast to mutual favorites
+
     var description: String {
         switch self {
         case .privateMessage: return "privateMessage"
@@ -116,6 +120,9 @@ enum NoisePayloadType: UInt8 {
         case .delivered: return "delivered"
         case .verifyChallenge: return "verifyChallenge"
         case .verifyResponse: return "verifyResponse"
+        case .trackRequest: return "trackRequest"
+        case .trackResponse: return "trackResponse"
+        case .locationAnnounce: return "locationAnnounce"
         }
     }
 }

@@ -61,6 +61,10 @@ final class TrackingService: ObservableObject {
     // Per-request start times for accurate RTT calculation
     private var requestStartTimes: [Data: Date] = [:]
 
+    // Location announcement timer
+    private var announcementTimer: Timer?
+    private let announceInterval: TimeInterval = 60.0
+
     // MARK: - Initialization
 
     private init(keychain: KeychainManagerProtocol = KeychainManager()) {
@@ -83,6 +87,8 @@ final class TrackingService: ObservableObject {
     deinit {
         pingTimer?.invalidate()
         pingTimer = nil
+        announcementTimer?.invalidate()
+        announcementTimer = nil
     }
 
     // MARK: - Public API
@@ -172,6 +178,113 @@ final class TrackingService: ObservableObject {
         SecureLogger.info("TrackingService: Cleared all cached locations", category: .session)
     }
 
+    // MARK: - Location Announcements
+
+    /// Start periodic location broadcasts to mutual favorites
+    func startLocationAnnouncements() {
+        guard announcementTimer == nil else { return }
+
+        // Create timer on main thread for @MainActor safety
+        announcementTimer = Timer.scheduledTimer(
+            withTimeInterval: announceInterval,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.broadcastLocation()
+            }
+        }
+
+        // Also broadcast immediately
+        broadcastLocation()
+        SecureLogger.info("TrackingService: Started location announcements (every \(Int(announceInterval))s)", category: .session)
+    }
+
+    /// Stop periodic location broadcasts
+    func stopLocationAnnouncements() {
+        announcementTimer?.invalidate()
+        announcementTimer = nil
+        SecureLogger.info("TrackingService: Stopped location announcements", category: .session)
+    }
+
+    /// Broadcast current location to all mutual favorites
+    private func broadcastLocation() {
+        guard locationManager.isLocationEnabled,
+              let location = locationManager.currentLocation else {
+            SecureLogger.debug("TrackingService: Skipping broadcast - location not available", category: .session)
+            return
+        }
+
+        let announce = LocationAnnounce(
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            gpsEnabled: true,
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            altitude: location.altitude,
+            horizontalAccuracy: location.horizontalAccuracy
+        )
+
+        let favorites = getMutualFavorites()
+        guard !favorites.isEmpty else {
+            SecureLogger.debug("TrackingService: No mutual favorites to broadcast to", category: .session)
+            return
+        }
+
+        // Send via BLE to connected peers
+        for peerID in favorites {
+            if bleService?.isPeerConnected(peerID) == true {
+                bleService?.sendLocationAnnounce(announce, to: peerID)
+            }
+        }
+
+        // Send via Nostr relay for offline delivery
+        for peerID in favorites {
+            if let noiseKey = getNoiseKey(for: peerID) {
+                nostrTransport?.sendLocationAnnounce(announce, to: peerID, noisePublicKey: noiseKey)
+            }
+        }
+
+        SecureLogger.debug("📍 Broadcast location to \(favorites.count) favorites", category: .session)
+    }
+
+    /// Handle incoming location announcement from peer
+    func handleLocationAnnounce(from peerID: PeerID, announce: LocationAnnounce, transport: PeerLocation.TransportType) {
+        let storageKey = normalizedStorageKey(for: peerID)
+
+        // Only update if newer than existing
+        if let existing = peerLocations[storageKey] {
+            let existingMs = UInt64(existing.timestamp.timeIntervalSince1970 * 1000)
+            if existingMs >= announce.timestamp {
+                SecureLogger.debug("TrackingService: Ignoring older announce from \(peerID.id.prefix(8))", category: .session)
+                return
+            }
+        }
+
+        let location = PeerLocation(
+            peerID: peerID,
+            announce: announce,
+            transport: transport
+        )
+
+        peerLocations[storageKey] = location
+        savePersistedLocations()
+
+        SecureLogger.info("📍 Received location announce from \(peerID.id.prefix(8)) via \(transport.rawValue)", category: .session)
+    }
+
+    /// Normalize peer ID to a consistent storage key (noise key hex) to avoid duplicates
+    private func normalizedStorageKey(for peerID: PeerID) -> String {
+        // If we have the noise key, use its hex as canonical key
+        if let noiseKey = peerID.noiseKey {
+            return noiseKey.hexEncodedString()
+        }
+        // Try to find noise key from favorites
+        if let noiseKey = getNoiseKey(for: peerID) {
+            return noiseKey.hexEncodedString()
+        }
+        // Fallback to raw ID
+        return peerID.id
+    }
+
     // MARK: - Private Methods
 
     private func pingViaBLE(_ peerID: PeerID) {
@@ -225,8 +338,9 @@ final class TrackingService: ObservableObject {
                 uwbDirection: uwbDirection
             )
 
-            // Store by string key for persistence
-            peerLocations[peerID.id] = location
+            // Store by normalized key (noise key hex if available) to avoid duplicates
+            let storageKey = normalizedStorageKey(for: peerID)
+            peerLocations[storageKey] = location
 
             // Persist updated locations
             savePersistedLocations()
@@ -358,4 +472,5 @@ final class TrackingService: ObservableObject {
             savePersistedLocations()
         }
     }
+
 }

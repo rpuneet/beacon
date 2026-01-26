@@ -927,6 +927,63 @@ final class BLEService: NSObject {
         }
     }
 
+    // MARK: - Location Announcements
+
+    func sendLocationAnnounce(_ announce: LocationAnnounce, to peerID: PeerID) {
+        var payload = Data([NoisePayloadType.locationAnnounce.rawValue])
+        payload.append(announce.toBinaryData())
+
+        guard noiseService.hasEstablishedSession(with: peerID) else {
+            SecureLogger.debug("📍 Cannot send location announce - no session with \(peerID.id.prefix(8))", category: .session)
+            return
+        }
+
+        do {
+            let encrypted = try noiseService.encrypt(payload, for: peerID)
+            let packet = BitchatPacket(
+                type: MessageType.noiseEncrypted.rawValue,
+                senderID: myPeerIDData,
+                recipientID: Data(hexString: peerID.id),
+                timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+                payload: encrypted,
+                signature: nil,
+                ttl: messageTTL
+            )
+            broadcastPacket(packet)
+            SecureLogger.debug("📍 Sent location announce to \(peerID.id.prefix(8))", category: .session)
+        } catch {
+            SecureLogger.error("Failed to send location announce: \(error)", category: .session)
+        }
+    }
+
+    private func handleLocationAnnounce(from peerID: PeerID, payload: Data) {
+        guard let announce = LocationAnnounce.fromBinaryData(payload) else {
+            SecureLogger.error("Failed to parse LocationAnnounce", category: .session)
+            return
+        }
+
+        // Forward to TrackingService (which will verify mutual favorite status)
+        Task { @MainActor in
+            // Verify sender is a mutual favorite (privacy check)
+            guard self.isMutualFavorite(peerID) else {
+                SecureLogger.warning("Ignoring location announce from non-favorite \(peerID.id.prefix(8))", category: .session)
+                return
+            }
+            TrackingService.shared.handleLocationAnnounce(from: peerID, announce: announce, transport: .ble)
+        }
+    }
+
+    @MainActor
+    private func isMutualFavorite(_ peerID: PeerID) -> Bool {
+        let shortID = peerID.toShort()
+        for (noiseKey, rel) in FavoritesPersistenceService.shared.favorites {
+            if rel.isMutual && PeerID(publicKey: noiseKey).toShort().id == shortID.id {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: Protocol utilities
     
     func getFingerprint(for peerID: PeerID) -> String? {
@@ -4536,6 +4593,8 @@ extension BLEService {
                 handleTrackRequest(from: peerID, payload: Data(payloadData))
             case .trackResponse:
                 handleTrackResponse(from: peerID, payload: Data(payloadData))
+            case .locationAnnounce:
+                handleLocationAnnounce(from: peerID, payload: Data(payloadData))
             case .none:
                 SecureLogger.warning("⚠️ Unknown noise payload type: \(payloadType)")
             }

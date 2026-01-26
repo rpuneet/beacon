@@ -143,6 +143,35 @@ struct PeerLocation: Identifiable, Equatable, Codable {
         self.timestamp = timestamp
     }
 
+    /// Create from a LocationAnnounce (passive periodic broadcast)
+    init(peerID: PeerID, announce: LocationAnnounce, transport: TransportType) {
+        self.id = peerID.id
+        self.peerIDString = peerID.id
+
+        if announce.gpsEnabled, let lat = announce.latitude, let lon = announce.longitude {
+            self.latitude = lat
+            self.longitude = lon
+        } else {
+            self.latitude = nil
+            self.longitude = nil
+        }
+        self.altitude = announce.altitude
+        self.horizontalAccuracy = announce.horizontalAccuracy
+        self.verticalAccuracy = nil
+        self.gpsEnabled = announce.gpsEnabled
+
+        self.transport = transport
+        self.pingMs = 0  // No ping for announcements
+        self.rssi = nil
+
+        self.uwbDistance = nil
+        self.uwbDirectionX = nil
+        self.uwbDirectionY = nil
+        self.uwbDirectionZ = nil
+
+        self.timestamp = Date(timeIntervalSince1970: Double(announce.timestamp) / 1000.0)
+    }
+
     // MARK: - Equatable
 
     static func == (lhs: PeerLocation, rhs: PeerLocation) -> Bool {

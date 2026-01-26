@@ -344,5 +344,5 @@ final class CommandProcessor {
             return .success(message: "removed \(nickname) from favorites")
         }
     }
-    
+
 }

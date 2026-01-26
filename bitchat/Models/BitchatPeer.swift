@@ -29,8 +29,8 @@ struct BitchatPeer: Equatable {
             return .bluetoothConnected
         } else if isReachable {
             return .meshReachable
-        } else if favoriteStatus?.isMutual == true {
-            // Mutual favorites can communicate via Nostr when offline
+        } else if isNostrReachable {
+            // Mutual favorites with known Nostr key can communicate via relay
             return .nostrAvailable
         } else {
             return .offline
@@ -44,9 +44,18 @@ struct BitchatPeer: Equatable {
     var isMutualFavorite: Bool {
         favoriteStatus?.isMutual ?? false
     }
-    
+
     var theyFavoritedUs: Bool {
         favoriteStatus?.theyFavoritedUs ?? false
+    }
+
+    var hasNostrKey: Bool {
+        favoriteStatus?.peerNostrPublicKey != nil
+    }
+
+    /// True if mutual favorite AND we have their Nostr key (can actually reach via relay)
+    var isNostrReachable: Bool {
+        isMutualFavorite && hasNostrKey
     }
     
     // Display helpers

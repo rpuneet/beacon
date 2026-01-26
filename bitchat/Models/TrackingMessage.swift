@@ -186,6 +186,75 @@ struct TrackResponse {
     }
 }
 
+// MARK: - Location Announce
+
+/// Periodic location broadcast sent to mutual favorites.
+/// Simpler than TrackResponse: no requestID, no UWB token - just GPS data.
+struct LocationAnnounce {
+    let timestamp: UInt64           // Unix ms when sent
+    let gpsEnabled: Bool
+    let latitude: Double?
+    let longitude: Double?
+    let altitude: Double?
+    let horizontalAccuracy: Double?
+
+    /// Binary format: [timestamp:8][flags:1][lat:8][lon:8][alt:8][hAcc:8] = 41 bytes max
+    func toBinaryData() -> Data {
+        var data = Data()
+        data.appendUInt64(timestamp)
+
+        var flags: UInt8 = 0
+        if gpsEnabled { flags |= 0x01 }
+        data.appendUInt8(flags)
+
+        if gpsEnabled {
+            data.appendDouble(latitude ?? 0)
+            data.appendDouble(longitude ?? 0)
+            data.appendDouble(altitude ?? 0)
+            data.appendDouble(horizontalAccuracy ?? -1)
+        }
+
+        return data
+    }
+
+    static func fromBinaryData(_ data: Data) -> LocationAnnounce? {
+        guard data.count >= 9 else { return nil } // 8 (timestamp) + 1 (flags)
+        var offset = 0
+
+        guard let timestamp = data.readUInt64(at: &offset),
+              let flags = data.readUInt8(at: &offset) else { return nil }
+
+        let gpsEnabled = (flags & 0x01) != 0
+
+        var latitude: Double? = nil
+        var longitude: Double? = nil
+        var altitude: Double? = nil
+        var horizontalAccuracy: Double? = nil
+
+        if gpsEnabled {
+            guard data.count >= offset + 32,
+                  let lat = data.readDouble(at: &offset),
+                  let lon = data.readDouble(at: &offset),
+                  let alt = data.readDouble(at: &offset),
+                  let hAcc = data.readDouble(at: &offset) else { return nil }
+
+            latitude = lat
+            longitude = lon
+            altitude = alt
+            horizontalAccuracy = hAcc >= 0 ? hAcc : nil
+        }
+
+        return LocationAnnounce(
+            timestamp: timestamp,
+            gpsEnabled: gpsEnabled,
+            latitude: latitude,
+            longitude: longitude,
+            altitude: altitude,
+            horizontalAccuracy: horizontalAccuracy
+        )
+    }
+}
+
 // MARK: - Data Extension for Double
 
 extension Data {

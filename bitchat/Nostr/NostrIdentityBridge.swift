@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import BitLogger
 
 /// Bridge between Noise and Nostr identities
 final class NostrIdentityBridge {
@@ -23,16 +24,18 @@ final class NostrIdentityBridge {
         // Check if we already have a Nostr identity
         if let existingData = keychain.load(key: currentIdentityKey, service: keychainService),
            let identity = try? JSONDecoder().decode(NostrIdentity.self, from: existingData) {
+            SecureLogger.info("🔑 Nostr identity LOADED from keychain: \(identity.npub)", category: .session)
             return identity
         }
-        
+
         // Generate new Nostr identity
         let nostrIdentity = try NostrIdentity.generate()
-        
+        SecureLogger.warning("🔑 Nostr identity GENERATED (keychain was empty): \(nostrIdentity.npub)", category: .session)
+
         // Store it
         let data = try JSONEncoder().encode(nostrIdentity)
         keychain.save(key: currentIdentityKey, data: data, service: keychainService, accessible: nil)
-        
+
         return nostrIdentity
     }
     

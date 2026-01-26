@@ -32,6 +32,8 @@ struct GroupTrackingView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var hasSetInitialRegion = false
+    @State private var cachedAnnotations: [TrackingAnnotationItem] = []
+    @State private var lastAnnotationUpdate: Date = .distantPast
 
     private var textColor: Color {
         colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
@@ -81,9 +83,11 @@ struct GroupTrackingView: View {
         }
         .onAppear {
             startTracking()
+            viewModel.trackingService.startLocationAnnouncements()
         }
         .onDisappear {
             viewModel.trackingService.stopTracking()
+            viewModel.trackingService.stopLocationAnnouncements()
         }
         .onChange(of: viewModel.peersWithLocation.count) { newCount in
             if !viewModel.userHasInteracted && newCount > 0 {
@@ -113,9 +117,24 @@ struct GroupTrackingView: View {
     private var headerView: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Text("tracking")
-                    .font(.bitchatSystem(size: 18, design: .monospaced))
-                    .foregroundColor(textColor)
+                // Beacon branding
+                HStack(spacing: 8) {
+                    Image(systemName: "location.north.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.linearGradient(
+                            colors: [Color(red: 0.2, green: 0.8, blue: 0.4), Color(red: 0.1, green: 0.6, blue: 0.3)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ))
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("bitchat")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Text("Beacon")
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .foregroundColor(.primary)
+                    }
+                }
 
                 Spacer()
 
@@ -126,27 +145,34 @@ struct GroupTrackingView: View {
 
                 // Close button
                 Button(action: { dismiss() }) {
-                    Image(systemName: "xmark")
-                        .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
-                        .frame(width: 32, height: 32)
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
             }
 
-            // Subtitle
-            HStack(spacing: 6) {
-                Image(systemName: "star.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(.yellow)
-                Text("\(viewModel.peersWithLocationCount) visible")
-                    .foregroundColor(.secondary)
+            // Status bar
+            HStack(spacing: 12) {
+                // Friends visible
+                Label("\(viewModel.peersWithLocationCount) friends", systemImage: "person.2.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(viewModel.peersWithLocationCount > 0 ? .green : .secondary)
+
+                // Connection status
+                if viewModel.isPinging {
+                    Label("Scanning...", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.orange)
+                }
+
+                Spacer()
             }
-            .font(.bitchatSystem(size: 12, design: .monospaced))
         }
         .padding(.horizontal, 16)
-        .padding(.top, 16)
-        .padding(.bottom, 12)
-        .background(backgroundColor)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
+        .background(.ultraThinMaterial)
     }
 
     /// Look up nickname for a peer from favorites
@@ -173,49 +199,49 @@ struct GroupTrackingView: View {
 
     @ViewBuilder
     private var mapContent: some View {
-        Map(coordinateRegion: $viewModel.mapRegion, showsUserLocation: !viewModel.isPinging, annotationItems: allAnnotationItems) { item in
-            MapAnnotation(coordinate: item.coordinate) {
+        Map(coordinateRegion: $viewModel.mapRegion, showsUserLocation: true, annotationItems: cachedAnnotations) { item in
+            MapAnnotation(coordinate: item.coordinate, anchorPoint: CGPoint(x: 0.5, y: 1.0)) {
                 switch item {
                 case .peer(let peerLocation):
-                    PeerAnnotationView(
-                        peer: peerLocation,
+                    SimplePeerPin(
                         nickname: nickname(for: peerLocation),
-                        isSelected: peerLocation.id == viewModel.selectedPeerID
+                        isSelected: peerLocation.id == viewModel.selectedPeerID,
+                        transport: peerLocation.transport
                     )
                     .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            if viewModel.selectedPeerID == peerLocation.id {
-                                viewModel.deselectPeer()
-                            } else {
-                                viewModel.selectPeer(peerLocation.id)
-                            }
+                        if viewModel.selectedPeerID == peerLocation.id {
+                            viewModel.deselectPeer()
+                        } else {
+                            viewModel.selectPeer(peerLocation.id)
                         }
                     }
 
                 case .userPing:
-                    ZStack {
-                        MapPingWave(isAnimating: viewModel.isPinging)
-                        Circle()
-                            .fill(Color.blue)
-                            .frame(width: 14, height: 14)
-                            .overlay(
-                                Circle()
-                                    .stroke(Color.white, lineWidth: 2)
-                            )
-                    }
+                    Circle()
+                        .fill(Color.blue)
+                        .frame(width: 12, height: 12)
+                        .overlay(Circle().stroke(Color.white, lineWidth: 2))
                 }
             }
         }
-        .simultaneousGesture(
+        .onReceive(Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()) { _ in
+            updateAnnotationsIfNeeded()
+        }
+        .onAppear {
+            updateAnnotationsIfNeeded()
+        }
+        .gesture(
             DragGesture().onChanged { _ in
                 viewModel.userHasInteracted = true
             }
         )
-        .simultaneousGesture(
-            MagnificationGesture().onChanged { _ in
-                viewModel.userHasInteracted = true
-            }
-        )
+    }
+
+    private func updateAnnotationsIfNeeded() {
+        let newItems: [TrackingAnnotationItem] = viewModel.peersWithLocation.map { .peer($0) }
+        if newItems.count != cachedAnnotations.count {
+            cachedAnnotations = newItems
+        }
     }
 
     private var hasFavorites: Bool {
@@ -223,43 +249,87 @@ struct GroupTrackingView: View {
     }
 
     private var loadingOverlay: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             if !hasFavorites {
-                // No favorites message
-                Image(systemName: "star")
-                    .font(.system(size: 32))
-                    .foregroundColor(.gray)
-                Text("No mutual favorites")
-                    .font(.bitchatSystem(size: 14, design: .monospaced))
-                    .foregroundColor(textColor)
-                Text("Add favorites to track friends")
-                    .font(.bitchatSystem(size: 12, design: .monospaced))
+                // No favorites - onboarding
+                Image(systemName: "person.2.circle")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.linearGradient(
+                        colors: [Color(red: 0.2, green: 0.8, blue: 0.4), Color(red: 0.1, green: 0.6, blue: 0.3)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+
+                Text("Add Friends to Track")
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundColor(.primary)
+
+                Text("Add mutual favorites in chat to see them on the map")
+                    .font(.system(size: 14))
                     .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+
             } else if viewModel.isPinging {
-                // Pinging in progress
-                ProgressView()
-                    .tint(textColor)
-                Text("Scanning...")
-                    .font(.bitchatSystem(size: 14, design: .monospaced))
-                    .foregroundColor(textColor)
-            } else {
-                // Has favorites but no locations yet
-                Image(systemName: "location.slash")
-                    .font(.system(size: 32))
-                    .foregroundColor(.gray)
-                Text("No locations yet")
-                    .font(.bitchatSystem(size: 14, design: .monospaced))
-                    .foregroundColor(textColor)
-                Text("Tap ping to scan for friends")
-                    .font(.bitchatSystem(size: 12, design: .monospaced))
+                // Scanning animation
+                ZStack {
+                    Circle()
+                        .stroke(.green.opacity(0.3), lineWidth: 3)
+                        .frame(width: 60, height: 60)
+
+                    Circle()
+                        .trim(from: 0, to: 0.3)
+                        .stroke(.green, lineWidth: 3)
+                        .frame(width: 60, height: 60)
+                        .rotationEffect(.degrees(-90))
+
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 24))
+                        .foregroundColor(.green)
+                }
+
+                Text("Finding friends...")
+                    .font(.system(size: 16, weight: .medium, design: .rounded))
+                    .foregroundColor(.primary)
+
+                Text("Via Bluetooth & Internet")
+                    .font(.system(size: 12))
                     .foregroundColor(.secondary)
+
+            } else {
+                // Has favorites but no locations
+                Image(systemName: "location.magnifyingglass")
+                    .font(.system(size: 48))
+                    .foregroundColor(.orange)
+
+                Text("Friends Not Found")
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundColor(.primary)
+
+                Text("Tap the ping button to locate your friends")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+
+                Button(action: { viewModel.pingAll() }) {
+                    Label("Find Friends", systemImage: "location.circle.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule()
+                                .fill(.green)
+                        )
+                }
+                .padding(.top, 4)
             }
         }
-        .padding(24)
+        .padding(28)
         .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(backgroundColor.opacity(0.9))
-                .shadow(radius: 8)
+            RoundedRectangle(cornerRadius: 20)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.15), radius: 20, y: 10)
         )
     }
 
@@ -281,30 +351,51 @@ struct GroupTrackingView: View {
     }
 
     private var peerListView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(allMutualFavorites) { entry in
-                    FavoriteRowView(
-                        entry: entry,
-                        isPinging: viewModel.isPinging,
-                        isSelected: entry.id == viewModel.selectedPeerID
-                    )
-                    .onTapGesture {
-                        withAnimation {
+        VStack(spacing: 0) {
+            // Section header
+            HStack {
+                Text("Friends")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("\(allMutualFavorites.count)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(allMutualFavorites) { entry in
+                        FavoriteRowView(
+                            entry: entry,
+                            isPinging: viewModel.isPinging,
+                            isSelected: entry.id == viewModel.selectedPeerID
+                        )
+                        .onTapGesture {
                             if viewModel.selectedPeerID == entry.id {
                                 viewModel.deselectPeer()
                             } else if entry.location?.hasLocation == true {
                                 viewModel.selectPeer(entry.id)
                             }
                         }
+
+                        if entry.id != allMutualFavorites.last?.id {
+                            Divider().padding(.leading, 52)
+                        }
                     }
                 }
+                .padding(.horizontal, 16)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
         }
-        .frame(maxHeight: 200)
-        .background(backgroundColor)
+        .frame(maxHeight: 180)
+        .background(.ultraThinMaterial)
     }
 
     // MARK: - Private Methods
@@ -359,7 +450,84 @@ enum TrackingAnnotationItem: Identifiable {
     }
 }
 
-// MARK: - Peer Annotation View
+// MARK: - Simple Peer Pin (Lightweight)
+
+struct SimplePeerPin: View {
+    let nickname: String
+    let isSelected: Bool
+    let transport: PeerLocation.TransportType
+    let isRecent: Bool
+
+    @State private var isPulsing = false
+
+    private var pinColor: Color {
+        switch transport {
+        case .ble: return .green
+        case .relay: return .purple
+        case .wifi: return .orange
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            // Nickname badge
+            Text(nickname)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(pinColor.opacity(0.9))
+                        .shadow(color: pinColor.opacity(0.5), radius: isSelected ? 8 : 4)
+                )
+
+            // Pin with pulse
+            ZStack {
+                // Pulse ring for recent updates
+                if isRecent {
+                    Circle()
+                        .stroke(pinColor.opacity(0.5), lineWidth: 2)
+                        .frame(width: 36, height: 36)
+                        .scaleEffect(isPulsing ? 1.5 : 1.0)
+                        .opacity(isPulsing ? 0 : 0.8)
+                        .animation(.easeOut(duration: 1.5).repeatForever(autoreverses: false), value: isPulsing)
+                }
+
+                // Main pin
+                Circle()
+                    .fill(pinColor)
+                    .frame(width: isSelected ? 28 : 22, height: isSelected ? 28 : 22)
+                    .overlay(
+                        Circle()
+                            .stroke(.white, lineWidth: 3)
+                    )
+                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+
+                // Transport icon
+                Image(systemName: transport == .ble ? "antenna.radiowaves.left.and.right" : "globe")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white)
+            }
+        }
+        .onAppear {
+            if isRecent {
+                isPulsing = true
+            }
+        }
+    }
+}
+
+extension SimplePeerPin {
+    init(nickname: String, isSelected: Bool, transport: PeerLocation.TransportType) {
+        self.nickname = nickname
+        self.isSelected = isSelected
+        self.transport = transport
+        self.isRecent = false
+    }
+}
+
+// MARK: - Peer Annotation View (Full Featured)
 
 struct PeerAnnotationView: View {
     let peer: PeerLocation
@@ -638,114 +806,97 @@ struct FavoriteRowView: View {
     let isPinging: Bool
     let isSelected: Bool
 
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var textColor: Color {
-        colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
-    }
-
     var body: some View {
         HStack(spacing: 12) {
-            // Status icon
-            Image(systemName: statusIcon)
-                .font(.system(size: 14))
-                .foregroundColor(statusColor)
-                .frame(width: 20)
+            // Avatar with status
+            ZStack(alignment: .bottomTrailing) {
+                Circle()
+                    .fill(avatarColor.opacity(0.2))
+                    .frame(width: 40, height: 40)
+                    .overlay(
+                        Text(String(entry.nickname.prefix(1)).uppercased())
+                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            .foregroundColor(avatarColor)
+                    )
 
-            // Nickname
-            Text(entry.nickname)
-                .font(.bitchatSystem(size: 14, design: .monospaced))
-                .foregroundColor(entry.hasResponded ? textColor : textColor.opacity(0.5))
+                // Status dot
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 12, height: 12)
+                    .overlay(Circle().stroke(.white, lineWidth: 2))
+                    .offset(x: 2, y: 2)
+            }
 
-            // Lock icon (only if responded via encrypted channel)
-            if entry.hasResponded {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 10))
-                    .foregroundColor(textColor.opacity(0.5))
+            // Name and status
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.nickname)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.primary)
+
+                HStack(spacing: 4) {
+                    if let loc = entry.location {
+                        // Transport
+                        Image(systemName: loc.transport == .ble ? "antenna.radiowaves.left.and.right" : "globe")
+                            .font(.system(size: 10))
+                        Text(loc.transport == .ble ? "Nearby" : "Remote")
+                            .font(.system(size: 12))
+
+                        if loc.pingMs > 0 {
+                            Text("•")
+                            Text("\(loc.pingMs)ms")
+                                .font(.system(size: 12, design: .monospaced))
+                        }
+                    } else if isPinging {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 10))
+                        Text("Searching...")
+                            .font(.system(size: 12))
+                    } else {
+                        Text("Tap to find")
+                            .font(.system(size: 12))
+                    }
+                }
+                .foregroundColor(.secondary)
             }
 
             Spacer()
 
-            // Connection info (if responded)
-            if let loc = entry.location {
-                // RTT
-                Text("\(loc.pingMs)ms")
-                    .font(.bitchatSystem(size: 11, design: .monospaced))
+            // Location indicator
+            if entry.hasLocation {
+                Image(systemName: "location.fill")
+                    .font(.system(size: 16))
                     .foregroundColor(.green)
-
-                // Transport badge
-                Text(loc.transport.rawValue)
-                    .font(.bitchatSystem(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule().fill(Color.secondary.opacity(0.15))
-                    )
-
-                // Stale indicator
-                if loc.isStale {
-                    Image(systemName: "clock")
-                        .font(.system(size: 10))
-                        .foregroundColor(.orange)
-                }
             } else if isPinging {
-                // Waiting for response
                 ProgressView()
-                    .scaleEffect(0.7)
+                    .scaleEffect(0.8)
             } else {
-                // Not responding
-                Text("offline")
-                    .font(.bitchatSystem(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
+                Image(systemName: "location.slash")
+                    .font(.system(size: 16))
+                    .foregroundColor(.secondary.opacity(0.5))
             }
-
-            // Location status dot
-            Circle()
-                .fill(locationStatusColor)
-                .frame(width: 8, height: 8)
-
-            // Favorite star
-            Image(systemName: "star.fill")
-                .font(.system(size: 14))
-                .foregroundColor(.yellow)
         }
-        .padding(.vertical, 8)
-        .background(isSelected ? textColor.opacity(0.1) : Color.clear)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 4)
+        .background(isSelected ? Color.green.opacity(0.1) : Color.clear)
+        .cornerRadius(8)
         .contentShape(Rectangle())
     }
 
-    private var statusIcon: String {
-        if entry.hasLocation {
-            return entry.location?.transport == .ble
-                ? "antenna.radiowaves.left.and.right"
-                : "globe"
-        } else if entry.hasResponded {
-            return "location.slash"
-        } else {
-            return "questionmark.circle"
-        }
-    }
-
-    private var statusColor: Color {
+    private var avatarColor: Color {
         if entry.hasLocation {
             return entry.location?.transport == .ble ? .green : .purple
-        } else if entry.hasResponded {
-            return .orange
         } else {
             return .gray
         }
     }
 
-    private var locationStatusColor: Color {
+    private var statusColor: Color {
         if entry.hasLocation {
             return .green
-        } else if entry.hasResponded && !(entry.location?.gpsEnabled ?? true) {
-            return .orange  // GPS disabled
         } else if entry.hasResponded {
-            return .gray  // Responded but no location
+            return .orange
         } else {
-            return .gray.opacity(0.5)  // Not responded
+            return .gray
         }
     }
 }

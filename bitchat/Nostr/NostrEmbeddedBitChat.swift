@@ -96,6 +96,48 @@ struct NostrEmbeddedBitChat {
         return "bitchat1:" + base64URLEncode(data)
     }
 
+    /// Build a `bitchat1:` base64url-encoded BitChat packet carrying a track request for Nostr DMs.
+    static func encodeTrackRequestForNostr(request: TrackRequest, recipientPeerID: PeerID, senderPeerID: PeerID) -> String? {
+        var payload = Data([NoisePayloadType.trackRequest.rawValue])
+        payload.append(request.toBinaryData())
+
+        let recipientID = normalizeRecipientPeerID(recipientPeerID)
+
+        let packet = BitchatPacket(
+            type: MessageType.noiseEncrypted.rawValue,
+            senderID: Data(hexString: senderPeerID.id) ?? Data(),
+            recipientID: Data(hexString: recipientID.id),
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: payload,
+            signature: nil,
+            ttl: 7
+        )
+
+        guard let data = packet.toBinaryData() else { return nil }
+        return "bitchat1:" + base64URLEncode(data)
+    }
+
+    /// Build a `bitchat1:` base64url-encoded BitChat packet carrying a track response for Nostr DMs.
+    static func encodeTrackResponseForNostr(response: TrackResponse, recipientPeerID: PeerID, senderPeerID: PeerID) -> String? {
+        var payload = Data([NoisePayloadType.trackResponse.rawValue])
+        payload.append(response.toBinaryData())
+
+        let recipientID = normalizeRecipientPeerID(recipientPeerID)
+
+        let packet = BitchatPacket(
+            type: MessageType.noiseEncrypted.rawValue,
+            senderID: Data(hexString: senderPeerID.id) ?? Data(),
+            recipientID: Data(hexString: recipientID.id),
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: payload,
+            signature: nil,
+            ttl: 7
+        )
+
+        guard let data = packet.toBinaryData() else { return nil }
+        return "bitchat1:" + base64URLEncode(data)
+    }
+
     private static func normalizeRecipientPeerID(_ recipientPeerID: PeerID) -> PeerID {
         if let maybeData = Data(hexString: recipientPeerID.id) {
             if maybeData.count == 32 {

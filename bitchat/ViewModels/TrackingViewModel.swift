@@ -120,11 +120,9 @@ final class TrackingViewModel: ObservableObject {
         selectedPeerID = peerIDString
         showingPeerDetail = true
 
-        // Center map on peer
+        // Center map on peer (no animation to avoid fighting with gestures)
         if let location = trackingService.peerLocations[peerIDString]?.coordinate {
-            withAnimation {
-                mapRegion.center = location
-            }
+            mapRegion.center = location
         }
     }
 
@@ -137,9 +135,7 @@ final class TrackingViewModel: ObservableObject {
     /// Center the map on the user's location
     func centerOnUser() {
         if let loc = myLocation {
-            withAnimation {
-                mapRegion.center = loc
-            }
+            mapRegion.center = loc
         }
     }
 
@@ -169,23 +165,21 @@ final class TrackingViewModel: ObservableObject {
         let latDelta = max(0.01, (maxLat - minLat) * 1.5)
         let lonDelta = max(0.01, (maxLon - minLon) * 1.5)
 
-        withAnimation(.easeInOut(duration: 0.5)) {
-            mapRegion = MKCoordinateRegion(
-                center: center,
-                span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lonDelta)
-            )
-        }
+        // Set region directly without animation to avoid fighting with user gestures
+        mapRegion = MKCoordinateRegion(
+            center: center,
+            span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lonDelta)
+        )
     }
 
     // MARK: - Private Methods
 
     private func setupObservers() {
-        // Auto-fit map when peers update (only if user hasn't interacted)
+        // Only observe for objectWillChange, don't auto-fit (causes jerky zoom)
         trackingService.$peerLocations
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                guard let self = self, !self.userHasInteracted else { return }
-                self.fitAllPeers()
+                self?.objectWillChange.send()
             }
             .store(in: &cancellables)
     }

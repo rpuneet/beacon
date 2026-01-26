@@ -117,68 +117,101 @@ struct PingButton: View {
 struct MapPingWave: View {
     let isAnimating: Bool
 
-    // 5 waves for 5-second ping
-    @State private var waveScales: [CGFloat] = [1.0, 1.0, 1.0, 1.0, 1.0]
-    @State private var waveOpacities: [Double] = [0.0, 0.0, 0.0, 0.0, 0.0]
+    // 8 waves for continuous radar effect
+    private let waveCount = 8
+    @State private var waveScales: [CGFloat] = Array(repeating: 1.0, count: 8)
+    @State private var waveOpacities: [Double] = Array(repeating: 0.0, count: 8)
+    @State private var animationTimer: Timer?
 
-    private let maxScale: CGFloat = 8.0  // Larger for map visibility
-    private let waveDuration: Double = 1.0
-    private let waveDelay: Double = 1.0  // 1 second between waves
+    private let maxScale: CGFloat = 15.0  // Much larger for map visibility
+    private let waveDuration: Double = 2.5  // Slower, longer waves
+    private let waveDelay: Double = 0.6  // Staggered start
 
     var body: some View {
         ZStack {
-            ForEach(0..<5, id: \.self) { index in
+            ForEach(0..<waveCount, id: \.self) { index in
                 Circle()
-                    .stroke(Color.green, lineWidth: 3)
-                    .frame(width: 20, height: 20)
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.green, Color.green.opacity(0.3)],
+                            startPoint: .center,
+                            endPoint: .trailing
+                        ),
+                        lineWidth: max(1, 4 - CGFloat(index) * 0.3)
+                    )
+                    .frame(width: 24, height: 24)
                     .scaleEffect(waveScales[index])
                     .opacity(waveOpacities[index])
             }
         }
         .onChange(of: isAnimating) { newValue in
             if newValue {
-                startAnimation()
+                startContinuousAnimation()
             } else {
-                resetAnimation()
+                stopAnimation()
             }
         }
         .onAppear {
             if isAnimating {
-                startAnimation()
+                startContinuousAnimation()
             }
+        }
+        .onDisappear {
+            stopAnimation()
         }
     }
 
-    private func startAnimation() {
-        // Reset all waves
-        for i in 0..<5 {
+    private func startContinuousAnimation() {
+        // Reset
+        for i in 0..<waveCount {
             waveScales[i] = 1.0
             waveOpacities[i] = 0.0
         }
 
-        // Start each wave with 1-second delay
-        for i in 0..<5 {
+        // Initial wave burst
+        triggerWaveBurst()
+
+        // Repeat every 5 seconds while animating
+        animationTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
+            guard isAnimating else { return }
+            triggerWaveBurst()
+        }
+    }
+
+    private func triggerWaveBurst() {
+        for i in 0..<waveCount {
             let delay = Double(i) * waveDelay
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard isAnimating else { return }
-                // Fade in
-                withAnimation(.easeIn(duration: 0.1)) {
-                    waveOpacities[i] = 0.8
+
+                // Reset this wave
+                waveScales[i] = 1.0
+                waveOpacities[i] = 0.0
+
+                // Fade in quickly
+                withAnimation(.easeIn(duration: 0.15)) {
+                    waveOpacities[i] = 0.7
                 }
-                // Expand and fade out
+
+                // Expand smoothly
                 withAnimation(.easeOut(duration: waveDuration)) {
                     waveScales[i] = maxScale
                 }
-                withAnimation(.easeOut(duration: waveDuration).delay(0.2)) {
+
+                // Fade out as it expands
+                withAnimation(.easeOut(duration: waveDuration * 0.8).delay(waveDuration * 0.2)) {
                     waveOpacities[i] = 0
                 }
             }
         }
     }
 
-    private func resetAnimation() {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            for i in 0..<5 {
+    private func stopAnimation() {
+        animationTimer?.invalidate()
+        animationTimer = nil
+
+        withAnimation(.easeOut(duration: 0.3)) {
+            for i in 0..<waveCount {
                 waveScales[i] = 1.0
                 waveOpacities[i] = 0
             }
