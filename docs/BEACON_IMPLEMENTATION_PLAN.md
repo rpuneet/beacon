@@ -4,306 +4,222 @@
 
 ---
 
+## Source Reference
+
+The old `app/beacon` branch has existing code that can be reused. This plan indicates:
+- **COPY** = Take directly from old branch (no changes needed)
+- **ADAPT** = Copy from old branch but modify for new architecture
+- **CREATE** = Write from scratch (doesn't exist or not reusable)
+- **CHERRY-PICK** = Take specific changes from old branch
+
+---
+
 ## Phase 1: Core Models & Services
 
-### 1.1 Create `PeerLocation.swift`
+### 1.1 `PeerLocation.swift` — ADAPT
 **Path:** `bitchat/Models/PeerLocation.swift`
+**Source:** `app/beacon:bitchat/Models/PeerLocation.swift`
 
-Data model for peer location and tracking signals.
+**What exists:** Full model with GPS, UWB, RSSI, transport type, timestamps.
+
+**Changes needed:**
+- Remove dependency on `TrackResponse` and `LocationAnnounce` (from deleted TrackingMessage.swift)
+- Add `PongResponseData` struct for JSON parsing
+- Update factory initializer to work with new JSON-based pong data
 
 ```swift
-// Key components:
-struct PeerLocation: Identifiable, Equatable, Codable
-struct PongResponseData: Codable  // JSON structure for [PONG] payload
-enum TransportType: String, Codable { case ble, relay }
-```
+// ADD: JSON structure for [PONG] payload
+struct PongResponseData: Codable {
+    struct GPS: Codable {
+        let enabled: Bool
+        let lat: Double?
+        let lon: Double?
+        let alt: Double?
+        let acc: Double?
+    }
+    struct UWB: Codable {
+        let supported: Bool
+        let token: String?  // base64
+    }
+    struct BLE: Codable {
+        let rssi: Int?
+    }
+    let gps: GPS
+    let uwb: UWB
+    let ble: BLE
+    let ts: Int64
+}
 
-**Dependencies:** None
+// KEEP: Most of PeerLocation struct
+// MODIFY: Factory initializer to use PongResponseData instead of TrackResponse
+```
 
 ---
 
-### 1.2 Create `BeaconService.swift`
+### 1.2 `BeaconService.swift` — ADAPT
 **Path:** `bitchat/Services/BeaconService.swift`
+**Source:** `app/beacon:bitchat/Services/TrackingService.swift` (rename + significant changes)
 
-Core service handling ping/pong logic.
+**What exists:** TrackingService with ping logic, peer location cache, UWB integration.
+
+**Changes needed:**
+- Rename class to `BeaconService`
+- Remove `Transport.sendTrackRequest()` calls — use `sendPrivateMessage("[PING]:...")` instead
+- Remove `Transport.sendLocationAnnounce()` calls
+- Add `handlePrivateMessage()` to parse `[PING]` and `[PONG]` prefixes
+- Add `buildPongResponse()` to create JSON payload
+- Remove persistence (keep it simple for v1)
+- Remove location announcement timer (not needed for on-demand pings)
 
 ```swift
-@MainActor
-final class BeaconService: ObservableObject {
-    static let shared = BeaconService()
+// REMOVE: These patterns from TrackingService
+bleService?.sendTrackRequest(to: peerID) { ... }  // OLD
+nostrTransport?.sendTrackRequest(to: peerID, noisePublicKey: key) { ... }  // OLD
 
-    // State
-    @Published private(set) var peerLocations: [String: PeerLocation] = [:]
-    @Published private(set) var isPinging = false
-
-    // Pending pings for RTT calculation
-    private var pendingPings: [String: (peerID: PeerID, noiseKey: Data, sentAt: Date)] = [:]
-
-    // Dependencies
-    private weak var bleService: BLEService?
-    private weak var nostrTransport: NostrTransport?
-
-    // MARK: - Configuration
-    func configure(ble: BLEService, nostr: NostrTransport)
-
-    // MARK: - Ping API
-    func pingAllFavorites()
-    func pingPeer(_ peerID: PeerID, noisePublicKey: Data)
-
-    // MARK: - Message Handling (called by ChatViewModel)
-    func handlePrivateMessage(from peerID: PeerID, content: String, transport: TransportType)
-
-    // MARK: - Private
-    private func handlePing(from peerID: PeerID, requestID: String, transport: TransportType)
-    private func handlePong(from peerID: PeerID, requestID: String, data: String, transport: TransportType)
-    private func buildPongResponse(for requesterPeerID: PeerID) -> PongResponseData
-    private func isMutualFavorite(_ peerID: PeerID) -> Bool
-}
+// REPLACE WITH:
+bleService?.sendPrivateMessage("[PING]:\(requestID)", to: peerID, ...)  // NEW
+nostrTransport?.sendPrivateMessage("[PING]:\(requestID)", to: peerID, ...)  // NEW
 ```
-
-**Dependencies:** PeerLocation.swift, BLEService, NostrTransport, FavoritesPersistenceService
 
 ---
 
-### 1.3 Create `UWBTrackingManager.swift`
+### 1.3 `UWBTrackingManager.swift` — COPY (minor cleanup)
 **Path:** `bitchat/Services/UWBTrackingManager.swift`
+**Source:** `app/beacon:bitchat/Services/UWBTrackingManager.swift`
 
-Manages UWB ranging sessions (iOS only).
+**What exists:** Full UWB implementation with NISession management, token generation, ranging.
 
-```swift
-#if os(iOS)
-import NearbyInteraction
-#endif
-
-final class UWBTrackingManager: NSObject, ObservableObject {
-    static let shared = UWBTrackingManager()
-
-    var isUWBSupported: Bool
-
-    // Get discovery token to send to peer
-    func getMyToken() -> Data?
-
-    // Start ranging with peer's token
-    func startRanging(with peerID: PeerID, peerToken: Data)
-    func stopRanging(with peerID: PeerID)
-    func stopAllRanging()
-
-    // Callbacks
-    var onDistanceUpdate: ((PeerID, Double, Float?) -> Void)?
-}
-```
-
-**Dependencies:** None (platform APIs only)
-
-**Note:** macOS stub returns `isUWBSupported = false`
+**Changes needed:**
+- Minor: Remove any references to deleted types (TrackingMessage, etc.) if present
+- Otherwise copy as-is — this is well-implemented
 
 ---
 
-### 1.4 Create `HapticManager.swift`
+### 1.4 `HapticManager.swift` — COPY
 **Path:** `bitchat/Utils/HapticManager.swift`
+**Source:** `app/beacon:bitchat/Utils/HapticManager.swift`
 
-Centralized haptic feedback (iOS only).
+**What exists:** Complete haptic feedback manager with ping-specific methods.
 
-```swift
-final class HapticManager {
-    static let shared = HapticManager()
-
-    func pingStarted()
-    func pingResponseReceived()
-    func pingCompleted(responseCount: Int)
-}
-```
-
-**Dependencies:** None
+**Changes needed:** None — copy as-is.
 
 ---
 
 ## Phase 2: View Layer
 
-### 2.1 Create `BeaconViewModel.swift`
+### 2.1 `BeaconViewModel.swift` — ADAPT
 **Path:** `bitchat/ViewModels/BeaconViewModel.swift`
+**Source:** `app/beacon:bitchat/ViewModels/TrackingViewModel.swift` (rename + simplify)
 
-UI state for BeaconView.
+**What exists:** TrackingViewModel with map region, selection state, ping triggers.
 
-```swift
-@MainActor
-final class BeaconViewModel: ObservableObject {
-    @Published var mapRegion: MKCoordinateRegion
-    @Published var selectedPeerID: String?
-    @Published var userHasInteracted = false
-
-    let beaconService = BeaconService.shared
-
-    // Computed
-    var myLocation: CLLocationCoordinate2D?
-    var peersWithLocation: [PeerLocation]
-    var isPinging: Bool
-
-    // Actions
-    func pingAll()
-    func selectPeer(_ id: String)
-    func deselectPeer()
-    func fitAllPeers()
-    func centerOnUser()
-}
-```
-
-**Dependencies:** BeaconService, LocationStateManager
+**Changes needed:**
+- Rename class to `BeaconViewModel`
+- Change `trackingService` reference to `beaconService`
+- Remove any references to deleted types
+- Simplify if needed
 
 ---
 
-### 2.2 Create `BeaconView.swift`
+### 2.2 `BeaconView.swift` — ADAPT
 **Path:** `bitchat/Views/BeaconView.swift`
+**Source:** `app/beacon:bitchat/Views/BeaconView.swift`
 
-Main beacon UI with map and favorites list.
+**What exists:** Full UI with map, annotations, favorites list, tracking popup.
 
-```swift
-struct BeaconView: View {
-    @StateObject private var viewModel = BeaconViewModel()
-    @EnvironmentObject private var chatViewModel: ChatViewModel
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 0) {
-            headerView       // Title + ping button + close
-            mapView          // Map with annotations
-            favoritesListView // Scrollable list of favorites with status
-        }
-    }
-}
-
-// Wrapper for sheet presentation
-struct BeaconSheetView: View { ... }
-```
-
-**Dependencies:** BeaconViewModel, ChatViewModel, FavoritesPersistenceService
+**Changes needed:**
+- Update to use `BeaconViewModel` instead of `TrackingViewModel`
+- Update to use `BeaconService` instead of `TrackingService`
+- Remove references to deleted components (DirectionalArrow, etc.)
+- Keep the core UI structure
 
 ---
 
-### 2.3 Create `PingWaveAnimation.swift`
+### 2.3 `PingWaveAnimation.swift` — COPY
 **Path:** `bitchat/Views/Components/PingWaveAnimation.swift`
+**Source:** `app/beacon:bitchat/Views/Components/PingWaveAnimation.swift`
 
-Animated ping button component.
+**What exists:** Complete ping button and wave animation components.
 
-```swift
-struct PingButton: View {
-    let isPinging: Bool
-    let action: () -> Void
-}
-```
-
-**Dependencies:** None
+**Changes needed:** None — copy as-is.
 
 ---
 
 ## Phase 3: Integration
 
-### 3.1 Modify `ChatViewModel.swift`
+### 3.1 `ChatViewModel.swift` — MODIFY
+**Source:** Changes from `app/beacon` branch + new routing logic
 
-**Changes needed:**
+**CHERRY-PICK from old branch:**
+- `nostrTransport` property exposure (line ~432 in old branch)
+- `refreshFavoriteNpubExchange()` method
+- `getPeerID(for:)` method (useful for beacon)
 
-1. **Expose nostrTransport** (if not already public):
+**NEW changes needed:**
+
 ```swift
-let nostrTransport: NostrTransport  // Change from private
-```
-
-2. **Route beacon messages** in private message handler:
-```swift
-// In the method that processes incoming private messages
-private func processPrivateMessageContent(from peerID: PeerID, content: String, ...) {
-    // NEW: Check for beacon messages first
+// In private message handler (wherever [FAVORITED] is handled)
+private func processPrivateMessageContent(from peerID: PeerID, content: String, transport: TransportType) {
+    // NEW: Route beacon messages
     if content.hasPrefix("[PING]:") || content.hasPrefix("[PONG]:") {
         BeaconService.shared.handlePrivateMessage(
             from: peerID,
             content: content,
-            transport: .ble  // or .relay depending on source
+            transport: transport
         )
-        return  // Don't display in chat
+        return  // Don't show in chat
     }
 
-    // Existing favorites handling
-    if content.hasPrefix("[FAVORITED]:") || content.hasPrefix("[UNFAVORITED]:") {
-        // ... existing code
-    }
-
-    // ... rest of message handling
+    // Existing [FAVORITED]/[UNFAVORITED] handling...
 }
-```
 
-3. **Configure BeaconService** in init or setup:
-```swift
+// In init or setupServices:
 BeaconService.shared.configure(ble: meshService, nostr: nostrTransport)
 ```
 
 ---
 
-### 3.2 Modify `ContentView.swift`
+### 3.2 `ContentView.swift` — MODIFY
+**Source:** Changes from `app/beacon` branch
 
-**Changes needed:**
+**CHERRY-PICK from old branch:**
+- `showGroupTrackingSheet` state (rename to `showBeaconSheet`)
+- `TrackingButtonContent` view (rename to `BeaconButtonContent`)
+- Beacon button in header
+- Sheet modifier for BeaconView
 
-1. **Add state for beacon sheet**:
-```swift
-@State private var showBeaconSheet = false
-```
-
-2. **Add beacon button** in header (near favorites/location buttons):
-```swift
-Button(action: { showBeaconSheet = true }) {
-    Image(systemName: "location.north.circle.fill")
-        .font(.system(size: 14))
-        .foregroundColor(.green)
-}
-.buttonStyle(.plain)
-```
-
-3. **Add sheet modifier**:
-```swift
-.sheet(isPresented: $showBeaconSheet) {
-    BeaconSheetView()
-        .environmentObject(viewModel)
-}
-```
+These exist in the old branch and can be adapted.
 
 ---
 
-### 3.3 Modify `LocationStateManager.swift`
+### 3.3 `LocationStateManager.swift` — CHERRY-PICK
+**Source:** `app/beacon` branch has all needed changes
 
-**Changes needed:**
+**CHERRY-PICK these additions:**
+- `isLocationEnabled` computed property
+- `currentLocation` computed property
+- `currentHeading` published property
+- `beginTrackingMode()` method
+- `endTrackingMode()` method
+- `requestFreshLocation(completion:)` method
 
-1. **Add fresh location request method**:
-```swift
-/// Request a fresh GPS fix with callback
-func requestFreshLocation(completion: @escaping (CLLocation?) -> Void) {
-    // Trigger one-shot location update
-    // Call completion with result or timeout after 3 seconds
-}
-```
-
-2. **Add tracking mode** (optional, for better accuracy during beacon):
-```swift
-func beginTrackingMode()  // Use kCLLocationAccuracyBest
-func endTrackingMode()    // Return to normal accuracy
-```
+All of these exist in the old branch diff and can be cherry-picked directly.
 
 ---
 
-### 3.4 Modify `BLEService.swift`
+### 3.4 `BLEService.swift` — CHERRY-PICK (minimal)
+**Source:** `app/beacon` branch
 
-**Changes needed:**
+**CHERRY-PICK only:**
+- `peerRSSI: [PeerID: Int]` dictionary
+- `getRSSI(for:)` method
+- RSSI tracking in `didDiscover` / `didReadRSSI`
 
-1. **Expose RSSI for peer** (add if not exists):
-```swift
-/// Get last known RSSI for a connected peer
-func getRSSI(for peerID: PeerID) -> Int? {
-    return collectionsQueue.sync { peerRSSI[peerID] }
-}
-```
-
-2. **Track RSSI** (if not already):
-```swift
-// In didDiscover or didReadRSSI delegate methods
-private var peerRSSI: [PeerID: Int] = [:]
-```
+**DO NOT cherry-pick:**
+- `sendTrackRequest()` method (not needed)
+- `handleTrackRequest()` / `handleTrackResponse()` (not needed)
+- `sendLocationAnnounce()` (not needed)
+- `TransportMetadata` conformance (not needed)
 
 ---
 
@@ -311,12 +227,7 @@ private var peerRSSI: [PeerID: Int] = [:]
 
 ### 4.1 Add Localizations
 
-Update `Localizable.xcstrings` with:
-- "Track Favorites" (button accessibility)
-- "Find Friends" (ping button)
-- "friends" (count label)
-- "Nearby" / "Remote" (transport labels)
-- etc.
+Update `Localizable.xcstrings` — can cherry-pick relevant strings from old branch.
 
 ---
 
@@ -337,27 +248,27 @@ Add new files to `bitchat.xcodeproj`:
 
 ```
 Phase 1: Core (can be done in parallel)
-├── 1.1 PeerLocation.swift
-├── 1.3 UWBTrackingManager.swift
-└── 1.4 HapticManager.swift
+├── 1.4 HapticManager.swift ───────────── COPY
+├── 1.3 UWBTrackingManager.swift ──────── COPY (minor cleanup)
+└── 1.1 PeerLocation.swift ────────────── ADAPT (add PongResponseData)
          │
          ▼
-    1.2 BeaconService.swift (depends on PeerLocation, UWB, Haptic)
+    1.2 BeaconService.swift ───────────── ADAPT (major rewrite)
          │
          ▼
 Phase 2: Views (can be done in parallel)
-├── 2.3 PingWaveAnimation.swift
-└── 2.1 BeaconViewModel.swift (depends on BeaconService)
+├── 2.3 PingWaveAnimation.swift ───────── COPY
+└── 2.1 BeaconViewModel.swift ─────────── ADAPT (rename + simplify)
          │
          ▼
-    2.2 BeaconView.swift (depends on ViewModel, Components)
+    2.2 BeaconView.swift ──────────────── ADAPT (update refs)
          │
          ▼
 Phase 3: Integration
-├── 3.1 ChatViewModel.swift changes
-├── 3.2 ContentView.swift changes
-├── 3.3 LocationStateManager.swift changes
-└── 3.4 BLEService.swift changes
+├── 3.3 LocationStateManager.swift ────── CHERRY-PICK
+├── 3.4 BLEService.swift ──────────────── CHERRY-PICK (RSSI only)
+├── 3.1 ChatViewModel.swift ───────────── MODIFY (add routing)
+└── 3.2 ContentView.swift ─────────────── CHERRY-PICK + MODIFY
          │
          ▼
 Phase 4: Polish
@@ -367,11 +278,32 @@ Phase 4: Polish
 
 ---
 
-## Cleanup: Old `app/beacon` Branch
+## Files from Old Branch: Action Summary
 
-If you want to clean up the old branch later, here's what to delete/revert:
+### COPY (use as-is)
+```
+app/beacon:bitchat/Utils/HapticManager.swift
+app/beacon:bitchat/Views/Components/PingWaveAnimation.swift
+```
 
-### Files to DELETE from old branch
+### ADAPT (copy + modify)
+```
+app/beacon:bitchat/Models/PeerLocation.swift → Remove TrackResponse dep, add PongResponseData
+app/beacon:bitchat/Services/TrackingService.swift → Rename to BeaconService, use [PING]/[PONG]
+app/beacon:bitchat/Services/UWBTrackingManager.swift → Minor cleanup if needed
+app/beacon:bitchat/ViewModels/TrackingViewModel.swift → Rename to BeaconViewModel
+app/beacon:bitchat/Views/BeaconView.swift → Update references
+```
+
+### CHERRY-PICK (take specific changes)
+```
+app/beacon:bitchat/Services/LocationStateManager.swift → Tracking mode methods
+app/beacon:bitchat/Services/BLE/BLEService.swift → RSSI tracking only
+app/beacon:bitchat/ViewModels/ChatViewModel.swift → nostrTransport exposure
+app/beacon:bitchat/Views/ContentView.swift → Beacon button + sheet
+```
+
+### DELETE (do not use)
 ```
 bitchat/Views/GroupTrackingView.swift
 bitchat/Views/TrackingView.swift
@@ -389,11 +321,9 @@ bitchat/Models/TrackingMessage.swift
 bitchat/Views/Components/DirectionalArrow.swift
 bitchat/Views/Components/HotColdIndicator.swift
 bitchat/Views/Components/TrackingSourceIndicators.swift
-bitchat/ViewModels/TrackingViewModel.swift
-bitchat/Services/TrackingService.swift
 ```
 
-### Files to REVERT (restore to main)
+### REVERT (restore to main, don't use old branch changes)
 ```
 bitchat/Services/Transport.swift
 bitchat/Services/MessageRouter.swift
@@ -401,28 +331,20 @@ bitchat/Protocols/BitchatProtocol.swift
 bitchat/Nostr/NostrEmbeddedBitChat.swift
 ```
 
-### Files to KEEP (can be adapted)
-```
-bitchat/Views/BeaconView.swift          → Adapt UI
-bitchat/Services/UWBTrackingManager.swift → Mostly reusable
-bitchat/Utils/HapticManager.swift        → Fully reusable
-bitchat/Views/Components/PingWaveAnimation.swift → Fully reusable
-```
-
 ---
 
 ## Estimated Scope
 
-| Category | Files | Lines (est.) |
-|----------|-------|--------------|
-| New Models | 1 | ~100 |
-| New Services | 3 | ~400 |
-| New ViewModels | 1 | ~100 |
-| New Views | 2 | ~500 |
-| Modified Files | 4 | ~100 |
-| **Total** | **11** | **~1200** |
+| Category | Action | Files | Lines (est.) |
+|----------|--------|-------|--------------|
+| Models | ADAPT | 1 | ~150 |
+| Services | COPY+ADAPT | 3 | ~500 |
+| ViewModels | ADAPT | 1 | ~100 |
+| Views | COPY+ADAPT | 2 | ~400 |
+| Integration | CHERRY-PICK+MODIFY | 4 | ~150 |
+| **Total** | | **11** | **~1300** |
 
-This is significantly smaller than the old branch (~9500 lines across 51 files).
+Much of this is adaptation rather than writing from scratch.
 
 ---
 
@@ -432,10 +354,10 @@ This is significantly smaller than the old branch (~9500 lines across 51 files).
 - [ ] Ping works over Nostr relay (devices not in BLE range)
 - [ ] Only mutual favorites can ping each other
 - [ ] Non-favorites are ignored (no response)
-- [ ] GPS disabled shows "Location disabled" in response
+- [ ] GPS disabled shows "gps.enabled: false" in response
 - [ ] UWB token is included on iPhone 11+
 - [ ] UWB ranging starts after receiving token
-- [ ] RSSI is included in BLE responses
+- [ ] Peer's RSSI is included in BLE responses
 - [ ] RTT (round-trip time) is calculated correctly
 - [ ] Map shows peer locations correctly
 - [ ] Selecting peer on map shows detail sheet
