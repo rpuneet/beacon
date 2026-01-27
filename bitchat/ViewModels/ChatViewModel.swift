@@ -443,6 +443,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         self.autocompleteService = AutocompleteService()
         self.deduplicationService = MessageDeduplicationService()
 
+        // Configure BeaconService with transports
+        if let bleService = transport as? BLEService {
+            BeaconService.shared.configure(ble: bleService, nostr: nostrTransport)
+        }
+
         // Wire up dependencies
         self.commandProcessor.contextProvider = self
         self.participantTracker.configure(context: self)

@@ -53,6 +53,7 @@ struct ContentView: View {
     @State private var autocompleteDebounceTimer: Timer?
     @State private var showLocationChannelsSheet = false
     @State private var showVerifySheet = false
+    @State private var showBeaconSheet = false
     @State private var expandedMessageIDs: Set<String> = []
     @State private var showLocationNotes = false
     @State private var notesGeohash: String? = nil
@@ -865,6 +866,14 @@ struct ContentView: View {
                         .foregroundColor(textColor)
                     Spacer()
                     if case .mesh = locationManager.selectedChannel {
+                        Button(action: { showBeaconSheet = true }) {
+                            Image(systemName: "location.circle")
+                                .font(.bitchatSystem(size: 14))
+                        }
+                        .buttonStyle(.plain)
+                        .help(
+                            String(localized: "content.help.beacon", comment: "Help text for beacon button")
+                        )
                         Button(action: { showVerifySheet = true }) {
                             Image(systemName: "qrcode")
                                 .font(.bitchatSystem(size: 14))
@@ -1367,6 +1376,10 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showVerifySheet) {
                 VerificationSheetView(isPresented: $showVerifySheet)
+                    .environmentObject(viewModel)
+            }
+            .sheet(isPresented: $showBeaconSheet) {
+                BeaconView()
                     .environmentObject(viewModel)
             }
         }

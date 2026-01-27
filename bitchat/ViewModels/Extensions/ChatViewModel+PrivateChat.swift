@@ -218,6 +218,12 @@ extension ChatViewModel {
             }
         }
         
+        // Check if this is a beacon PING/PONG message (from Nostr)
+        if pm.content.hasPrefix("[PING]:") || pm.content.hasPrefix("[PONG]:") {
+            BeaconService.shared.handlePrivateMessage(from: convKey, content: pm.content, transport: .relay)
+            return  // Don't store as a regular message
+        }
+
         let senderName = displayNameForNostrPubkey(senderPubkey)
         let msg = BitchatMessage(
             id: messageId,
@@ -594,6 +600,12 @@ extension ChatViewModel {
             return
         }
 
+        // Check if this is a beacon PING/PONG message (from Nostr stable key path)
+        if messageContent.hasPrefix("[PING]:") || messageContent.hasPrefix("[PONG]:") {
+            BeaconService.shared.handlePrivateMessage(from: targetPeerID, content: messageContent, transport: .relay)
+            return  // Don't store as a regular message
+        }
+
         if isDuplicateMessage(messageId, targetPeerID: targetPeerID) {
             return
         }
@@ -681,6 +693,12 @@ extension ChatViewModel {
         // Check if this is a favorite/unfavorite notification
         if message.content.hasPrefix("[FAVORITED]") || message.content.hasPrefix("[UNFAVORITED]") {
             handleFavoriteNotificationFromMesh(message.content, from: peerID, senderNickname: message.sender)
+            return  // Don't store as a regular message
+        }
+
+        // Check if this is a beacon PING/PONG message
+        if message.content.hasPrefix("[PING]:") || message.content.hasPrefix("[PONG]:") {
+            BeaconService.shared.handlePrivateMessage(from: peerID, content: message.content, transport: .ble)
             return  // Don't store as a regular message
         }
         

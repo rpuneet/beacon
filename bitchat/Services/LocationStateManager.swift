@@ -24,6 +24,18 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         case authorized
     }
 
+    // MARK: - Public Computed Properties (for beacon)
+
+    /// Whether location permission is granted
+    var isLocationEnabled: Bool {
+        permissionState == .authorized
+    }
+
+    /// Current CLLocation if available (for beacon feature)
+    var currentLocation: CLLocation? {
+        lastLocation
+    }
+
     // MARK: - Private Properties (CoreLocation)
 
     private let cl = CLLocationManager()
@@ -201,6 +213,64 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
     }
 
+    // MARK: - Public API (Beacon Mode - High Precision GPS + Heading)
+
+    /// Begin high-precision tracking mode.
+    /// Uses maximum GPS accuracy for precise peer tracking.
+    func beginTrackingMode() {
+        guard permissionState == .authorized else { return }
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        cl.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        cl.distanceFilter = kCLDistanceFilterNone
+        cl.startUpdatingLocation()
+    }
+
+    /// End high-precision tracking mode and return to standby settings.
+    func endTrackingMode() {
+        cl.stopUpdatingLocation()
+        cl.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
+    }
+
+    /// Request a fresh location update with callback.
+    /// Returns cached location immediately if it's less than 10 seconds old.
+    /// - Parameter completion: Called when location is available or timeout (3s) occurs
+    func requestFreshLocation(completion: @escaping (CLLocation?) -> Void) {
+        guard permissionState == .authorized else {
+            completion(nil)
+            return
+        }
+
+        // If we have a recent location (< 10 seconds old), use it immediately
+        if let cached = lastLocation, Date().timeIntervalSince(cached.timestamp) < 10 {
+            completion(cached)
+            return
+        }
+
+        // Otherwise request fresh location
+        beginTrackingMode()
+        cl.requestLocation()
+
+        var hasCompleted = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: .init("LocationStateManager.didUpdateLocation"),
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            guard !hasCompleted else { return }
+            hasCompleted = true
+            completion(self?.lastLocation)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            NotificationCenter.default.removeObserver(observer)
+            guard !hasCompleted else { return }
+            hasCompleted = true
+            completion(self?.lastLocation)
+        }
+    }
+
     // MARK: - Public API (Channel Selection)
 
     func select(_ channel: ChannelID) {
@@ -303,6 +373,8 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         lastLocation = loc
         computeChannels(from: loc.coordinate)
         reverseGeocodeLocation(loc)
+        // Notify any pending beacon location requests
+        NotificationCenter.default.post(name: .init("LocationStateManager.didUpdateLocation"), object: self)
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

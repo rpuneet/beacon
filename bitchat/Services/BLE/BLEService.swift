@@ -76,7 +76,15 @@ final class BLEService: NSObject {
     private var currentPeerIDs: [PeerID] {
         Array(peers.keys)
     }
-    
+
+    // RSSI per peer (updated on didDiscover for connected peers)
+    private var peerRSSI: [PeerID: Int] = [:]
+
+    /// Get last known RSSI for a connected peer (for beacon feature)
+    func getRSSI(for peerID: PeerID) -> Int? {
+        collectionsQueue.sync { peerRSSI[peerID] }
+    }
+
     // 4. Efficient Message Deduplication
     private let messageDeduplicator = MessageDeduplicator()
     private var selfBroadcastMessageIDs: [String: (id: String, timestamp: Date)] = [:]
@@ -1795,6 +1803,12 @@ extension BLEService: CBCentralManagerDelegate {
         // Check if we already have this peripheral
         if let state = peripherals[peripheralID] {
             if state.isConnected || state.isConnecting {
+                // Update RSSI for beacon feature if peer is authenticated
+                if let peerID = state.peerID {
+                    collectionsQueue.async(flags: .barrier) { [weak self] in
+                        self?.peerRSSI[peerID] = rssiValue
+                    }
+                }
                 return // Already connected or connecting
             }
             
