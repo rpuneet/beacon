@@ -143,15 +143,19 @@ final class BeaconService: ObservableObject {
     func handlePrivateMessage(from peerID: PeerID, content: String, transport: PeerLocation.TransportType) -> Bool {
         if content.hasPrefix("[PING]:") {
             let requestID = String(content.dropFirst(7))
+            SecureLogger.info("BeaconService: >>> Incoming PING from \(peerID.id.prefix(16)) via \(transport)", category: .session)
             handlePingRequest(from: peerID, requestID: requestID, transport: transport)
             return true
         } else if content.hasPrefix("[PONG]:") {
             // Format: [PONG]:requestID:base64data
+            SecureLogger.info("BeaconService: >>> Incoming PONG from \(peerID.id.prefix(16)) via \(transport)", category: .session)
             let parts = content.dropFirst(7).split(separator: ":", maxSplits: 1)
             if parts.count == 2 {
                 let requestID = String(parts[0])
                 let base64Data = String(parts[1])
                 handlePongResponse(from: peerID, requestID: requestID, base64Data: base64Data, transport: transport)
+            } else {
+                SecureLogger.error("BeaconService: Malformed PONG - expected 2 parts, got \(parts.count)", category: .session)
             }
             return true
         }
@@ -177,49 +181,47 @@ final class BeaconService: ObservableObject {
     }
 
     private func buildAndSendPongResponse(to peerID: PeerID, requestID: String, transport: PeerLocation.TransportType) {
-        // Request fresh location
-        locationManager.requestFreshLocation { [weak self] location in
-            guard let self = self else { return }
+        // Use current location directly - no waiting, LocationStateManager already has the latest
+        let location = locationManager.currentLocation
 
-            Task { @MainActor in
-                // Get UWB token if supported (create session for this peer)
-                let uwbToken = self.uwbManager.getMyTokenData(for: peerID)
+        // Get UWB token if supported (create session for this peer)
+        let uwbToken = uwbManager.getMyTokenData(for: peerID)
 
-                // Get RSSI we see for the requester (only for BLE)
-                let rssi: Int? = transport == .ble ? self.bleService?.getRSSI(for: peerID) : nil
+        // Get RSSI we see for the requester (only for BLE)
+        let rssi: Int? = transport == .ble ? bleService?.getRSSI(for: peerID) : nil
 
-                // Build response
-                let response = PongResponseData.build(
-                    gpsEnabled: self.locationManager.isLocationEnabled,
-                    location: location,
-                    uwbSupported: self.uwbManager.isUWBSupported,
-                    uwbToken: uwbToken,
-                    rssiForRequester: rssi
-                )
+        // Build response
+        let response = PongResponseData.build(
+            gpsEnabled: locationManager.isLocationEnabled,
+            location: location,
+            uwbSupported: uwbManager.isUWBSupported,
+            uwbToken: uwbToken,
+            rssiForRequester: rssi
+        )
 
-                guard let base64Response = response.toBase64() else {
-                    SecureLogger.error("BeaconService: Failed to encode PONG response", category: .session)
-                    return
-                }
-
-                let content = "[PONG]:\(requestID):\(base64Response)"
-
-                // Send via same transport we received on
-                if transport == .ble {
-                    self.bleService?.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: UUID().uuidString)
-                } else {
-                    self.nostrTransport?.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: UUID().uuidString)
-                }
-
-                SecureLogger.info("BeaconService: Sent PONG to \(peerID.id.prefix(8)), gps=\(response.gps.enabled), uwb=\(response.uwb.supported)", category: .session)
-            }
+        guard let base64Response = response.toBase64() else {
+            SecureLogger.error("BeaconService: Failed to encode PONG response", category: .session)
+            return
         }
+
+        let content = "[PONG]:\(requestID):\(base64Response)"
+
+        // Send via same transport we received on
+        if transport == .ble {
+            bleService?.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: UUID().uuidString)
+        } else {
+            nostrTransport?.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: UUID().uuidString)
+        }
+
+        SecureLogger.info("BeaconService: Sent PONG to \(peerID.id.prefix(8)), gps=\(response.gps.enabled), uwb=\(response.uwb.supported)", category: .session)
     }
 
     private func handlePongResponse(from peerID: PeerID, requestID: String, base64Data: String, transport: PeerLocation.TransportType) {
+        SecureLogger.debug("BeaconService: Looking for pending ping \(requestID.prefix(8)), have \(pendingPings.count) pending", category: .session)
+
         // Find and remove pending ping
         guard let pending = pendingPings.removeValue(forKey: requestID) else {
-            SecureLogger.warning("BeaconService: Received PONG for unknown request \(requestID.prefix(8))", category: .session)
+            SecureLogger.warning("BeaconService: Received PONG for unknown request \(requestID.prefix(8)). Pending IDs: \(pendingPings.keys.map { $0.prefix(8) }.joined(separator: ", "))", category: .session)
             return
         }
 
