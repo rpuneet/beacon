@@ -3146,10 +3146,11 @@ extension BLEService {
     // MARK: Private Message Handling
     
     private func sendPrivateMessage(_ content: String, to recipientID: PeerID, messageID: String) {
-        SecureLogger.debug("📨 Sending PM to \(recipientID): \(content.prefix(30))...", category: .session)
-        
+        let hasSession = noiseService.hasEstablishedSession(with: recipientID)
+        SecureLogger.info("📨 Sending PM to \(recipientID.id.prefix(16)), hasSession=\(hasSession), content=\(content.prefix(30))...", category: .session)
+
         // Check if we have an established Noise session
-        if noiseService.hasEstablishedSession(with: recipientID) {
+        if hasSession {
             // Encrypt and send
             do {
                 // Create TLV-encoded private message
@@ -3202,7 +3203,7 @@ extension BLEService {
             }
         } else {
             // Queue message for sending after handshake completes
-            SecureLogger.debug("🤝 No session with \(recipientID), initiating handshake and queueing message", category: .session)
+            SecureLogger.warning("🤝 No session with \(recipientID.id.prefix(16)), initiating handshake and queueing message", category: .session)
             
             // Queue the message (especially important for favorite notifications)
             collectionsQueue.sync(flags: .barrier) {
