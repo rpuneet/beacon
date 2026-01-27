@@ -41,6 +41,7 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     private let cl = CLLocationManager()
     private let geocoder = CLGeocoder()
     private var lastLocation: CLLocation?
+    private var lastLocationReceivedAt: Date?
     private var refreshTimer: Timer?
     private var isGeocoding: Bool = false
 
@@ -242,8 +243,10 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
             return
         }
 
-        // If we have a recent location (< 10 seconds old), use it immediately
-        if let cached = lastLocation, Date().timeIntervalSince(cached.timestamp) < 10 {
+        // If we received a location update recently (< 10 seconds), use cached immediately
+        if let cached = lastLocation,
+           let receivedAt = lastLocationReceivedAt,
+           Date().timeIntervalSince(receivedAt) < 10 {
             completion(cached)
             return
         }
@@ -371,6 +374,7 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { return }
         lastLocation = loc
+        lastLocationReceivedAt = Date()
         computeChannels(from: loc.coordinate)
         reverseGeocodeLocation(loc)
         // Notify any pending beacon location requests
