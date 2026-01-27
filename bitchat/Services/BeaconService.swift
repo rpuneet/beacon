@@ -165,8 +165,15 @@ final class BeaconService: ObservableObject {
     // MARK: - Private: Ping Handling
 
     private func handlePingRequest(from peerID: PeerID, requestID: String, transport: PeerLocation.TransportType) {
-        // CRITICAL: Only respond to mutual favorites
-        guard isMutualFavorite(peerID) else {
+        // Look up the noise key - needed for mutual favorite check AND for sending response
+        // The peerID we receive might be an ephemeral BLE ID, but we need to respond
+        // using the noise key-based peer ID so the recipient recognizes it as "for me"
+        guard let noiseKey = getNoiseKey(for: peerID) else {
+            SecureLogger.warning("BeaconService: Ignoring PING from unknown peer \(peerID.id.prefix(8))", category: .session)
+            return
+        }
+
+        guard favoritesService.favorites[noiseKey]?.isMutual == true else {
             SecureLogger.warning("BeaconService: Ignoring PING from non-mutual-favorite \(peerID.id.prefix(8))", category: .session)
             return
         }
@@ -176,8 +183,10 @@ final class BeaconService: ObservableObject {
         // Notify UI that we received a ping
         HapticManager.shared.pingResponseReceived()
 
-        // Build response with current location, UWB token, and RSSI
-        buildAndSendPongResponse(to: peerID, requestID: requestID, transport: transport)
+        // Send PONG to the noise key-based peer ID (not the ephemeral BLE ID)
+        // This ensures the recipient's BLE layer recognizes the packet as addressed to them
+        let noiseKeyPeerID = PeerID(publicKey: noiseKey)
+        buildAndSendPongResponse(to: noiseKeyPeerID, requestID: requestID, transport: transport)
     }
 
     private func buildAndSendPongResponse(to peerID: PeerID, requestID: String, transport: PeerLocation.TransportType) {
