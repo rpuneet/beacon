@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import CoreLocation
 
 struct PingWaveAnimation: View {
     let isAnimating: Bool
@@ -299,6 +300,62 @@ struct PingResponseFlash: View {
                     }
                 }
             }
+    }
+}
+
+// MARK: - Pong Response Wave (for peer locations on map)
+
+/// Single wave animation that plays once when a PONG is received
+struct PongResponseWave: View {
+    let trigger: Bool  // Toggle this to trigger animation
+    let color: Color
+
+    @State private var scale: CGFloat = 1.0
+    @State private var opacity: Double = 0.0
+
+    var body: some View {
+        Circle()
+            .stroke(color, lineWidth: 3)
+            .frame(width: 30, height: 30)
+            .scaleEffect(scale)
+            .opacity(opacity)
+            .onChange(of: trigger) { _ in
+                playAnimation()
+            }
+    }
+
+    private func playAnimation() {
+        // Reset
+        scale = 1.0
+        opacity = 0.0
+
+        // Fade in
+        withAnimation(.easeIn(duration: 0.1)) {
+            opacity = 0.9
+        }
+
+        // Expand
+        withAnimation(.easeOut(duration: 1.2)) {
+            scale = 8.0
+        }
+
+        // Fade out
+        withAnimation(.easeOut(duration: 1.0).delay(0.2)) {
+            opacity = 0.0
+        }
+    }
+}
+
+/// Identifiable struct for tracking PONG waves at coordinates
+struct PongWaveItem: Identifiable {
+    let id: UUID
+    let coordinate: CLLocationCoordinate2D
+    let timestamp: Date
+
+    init(coordinate: CLLocationCoordinate2D) {
+        self.id = UUID()
+        self.coordinate = coordinate
+        self.timestamp = Date()
     }
 }
 

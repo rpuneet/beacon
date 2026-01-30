@@ -115,18 +115,18 @@ struct PrivateMessagePacket {
 
     func encode() -> Data? {
         var data = Data()
-        data.reserveCapacity(2 + min(messageID.count, 255) + 2 + min(content.count, 255))
 
-        // TLV for messageID
+        // TLV for messageID (1-byte length, max 255)
         guard let messageIDData = messageID.data(using: .utf8), messageIDData.count <= 255 else { return nil }
         data.append(TLVType.messageID.rawValue)
         data.append(UInt8(messageIDData.count))
         data.append(messageIDData)
 
-        // TLV for content
-        guard let contentData = content.data(using: .utf8), contentData.count <= 255 else { return nil }
+        // TLV for content (2-byte length, max 65535)
+        guard let contentData = content.data(using: .utf8), contentData.count <= 65535 else { return nil }
         data.append(TLVType.content.rawValue)
-        data.append(UInt8(contentData.count))
+        data.append(UInt8((contentData.count >> 8) & 0xFF))  // High byte
+        data.append(UInt8(contentData.count & 0xFF))         // Low byte
         data.append(contentData)
 
         return data
@@ -141,18 +141,23 @@ struct PrivateMessagePacket {
             guard let type = TLVType(rawValue: data[offset]) else { return nil }
             offset += 1
 
-            let length = Int(data[offset])
-            offset += 1
-
-            guard offset + length <= data.count else { return nil }
-            let value = data[offset..<offset + length]
-            offset += length
-
             switch type {
             case .messageID:
-                messageID = String(data: value, encoding: .utf8)
+                // 1-byte length
+                let length = Int(data[offset])
+                offset += 1
+                guard offset + length <= data.count else { return nil }
+                messageID = String(data: data[offset..<offset + length], encoding: .utf8)
+                offset += length
+
             case .content:
-                content = String(data: value, encoding: .utf8)
+                // 2-byte length (big-endian)
+                guard offset + 2 <= data.count else { return nil }
+                let length = (Int(data[offset]) << 8) | Int(data[offset + 1])
+                offset += 2
+                guard offset + length <= data.count else { return nil }
+                content = String(data: data[offset..<offset + length], encoding: .utf8)
+                offset += length
             }
         }
 

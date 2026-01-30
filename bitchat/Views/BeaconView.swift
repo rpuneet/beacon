@@ -17,6 +17,8 @@ struct BeaconView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedFavoriteKey: Data?
+    @State private var pongWaves: [PongWaveItem] = []
+    @State private var lastPongId: UUID?
 
     private var textColor: Color {
         colorScheme == .dark ? .green : Color(red: 0, green: 0.5, blue: 0)
@@ -66,11 +68,26 @@ struct BeaconView: View {
         }
         .onDisappear {
             viewModel.locationManager.endTrackingMode()
+            viewModel.stopBeaconMode()
         }
         .onChange(of: locationManager.currentLocation) { newLocation in
             if let loc = newLocation, !viewModel.userHasInteracted {
                 withAnimation(.easeInOut(duration: 0.5)) {
                     viewModel.mapRegion.center = loc.coordinate
+                }
+            }
+        }
+        .onChange(of: viewModel.lastPongWave?.id) { newId in
+            // Add new PONG wave when received
+            if let newId = newId, newId != lastPongId,
+               let wave = viewModel.lastPongWave {
+                lastPongId = newId
+                let waveItem = PongWaveItem(coordinate: wave.coordinate)
+                pongWaves.append(waveItem)
+
+                // Remove wave after animation completes
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    pongWaves.removeAll { $0.id == waveItem.id }
                 }
             }
         }
@@ -91,14 +108,44 @@ struct BeaconView: View {
                         .fill(.green)
                         .frame(width: 6, height: 6)
                 }
-                Text("\(viewModel.peersWithLocationCount) online")
+                Text("\(viewModel.peersWithLocationCount)/\(viewModel.favoritesCount)")
                     .font(.bitchatSystem(size: 12, design: .monospaced))
                     .foregroundColor(secondaryTextColor)
             }
 
             Spacer()
 
-            // Ping button
+            #if os(iOS)
+            // Compass heading toggle (iOS only - macOS has no compass)
+            Button(action: { viewModel.followsHeading.toggle() }) {
+                Image(systemName: viewModel.followsHeading ? "location.north.fill" : "location.north")
+                    .font(.system(size: 16))
+                    .foregroundColor(viewModel.followsHeading ? .blue : secondaryTextColor)
+            }
+            .buttonStyle(.plain)
+            .help("Toggle compass mode")
+            #endif
+
+            // Beacon mode toggle (auto-ping every 30s)
+            Button(action: { viewModel.toggleBeaconMode() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: viewModel.isBeaconModeEnabled ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                        .font(.system(size: 14))
+                    if viewModel.isBeaconModeEnabled {
+                        Text("ON")
+                            .font(.bitchatSystem(size: 10, weight: .semibold, design: .monospaced))
+                    }
+                }
+                .foregroundColor(viewModel.isBeaconModeEnabled ? .green : secondaryTextColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(viewModel.isBeaconModeEnabled ? Color.green.opacity(0.2) : Color.clear)
+                .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .help(viewModel.isBeaconModeEnabled ? "Auto-ping ON (every 30s)" : "Enable auto-ping")
+
+            // Manual ping button
             Button(action: { viewModel.pingAll() }) {
                 if viewModel.isPinging {
                     ProgressView()
@@ -112,6 +159,7 @@ struct BeaconView: View {
             }
             .buttonStyle(.plain)
             .disabled(viewModel.isPinging)
+            .help("Ping now")
 
             // Close button
             Button(action: { dismiss() }) {
@@ -131,22 +179,49 @@ struct BeaconView: View {
 
     private var mapView: some View {
         ZStack {
+            #if os(iOS)
+            // Use CompassMapView for heading support on iOS
+            CompassMapView(
+                region: $viewModel.mapRegion,
+                annotations: compassAnnotations,
+                showsUserLocation: true,
+                followsHeading: viewModel.followsHeading,
+                onAnnotationTap: { noiseKey in
+                    withAnimation(.spring(response: 0.3)) {
+                        if selectedFavoriteKey == noiseKey {
+                            selectedFavoriteKey = nil
+                        } else {
+                            selectFavorite(noiseKey)
+                        }
+                    }
+                },
+                onMapInteraction: {
+                    viewModel.userHasInteracted = true
+                }
+            )
+            #else
+            // Use regular Map on macOS
             Map(coordinateRegion: $viewModel.mapRegion,
                 showsUserLocation: true,
-                annotationItems: mapAnnotations) { item in
-                MapAnnotation(coordinate: item.coordinate, anchorPoint: CGPoint(x: 0.5, y: 1.0)) {
-                    BeaconMapPin(
-                        nickname: nickname(for: item.noiseKey),
-                        isSelected: selectedFavoriteKey == item.noiseKey,
-                        hasUWB: item.location?.uwbDistance != nil,
-                        transport: item.location?.transport ?? .relay
-                    )
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.3)) {
-                            if selectedFavoriteKey == item.noiseKey {
-                                selectedFavoriteKey = nil
-                            } else {
-                                selectFavorite(item.noiseKey)
+                annotationItems: mapAnnotations + pongWaveAnnotations) { item in
+                MapAnnotation(coordinate: item.coordinate, anchorPoint: CGPoint(x: 0.5, y: 0.5)) {
+                    if item.isPongWave {
+                        PongResponseWave(trigger: true, color: .green)
+                            .allowsHitTesting(false)
+                    } else {
+                        BeaconMapPin(
+                            nickname: nickname(for: item.noiseKey),
+                            isSelected: selectedFavoriteKey == item.noiseKey,
+                            hasUWB: item.location?.uwbDistance != nil,
+                            transport: item.location?.transport ?? .relay
+                        )
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.3)) {
+                                if selectedFavoriteKey == item.noiseKey {
+                                    selectedFavoriteKey = nil
+                                } else {
+                                    selectFavorite(item.noiseKey)
+                                }
                             }
                         }
                     }
@@ -158,12 +233,44 @@ struct BeaconView: View {
                         viewModel.userHasInteracted = true
                     }
             )
+            #endif
 
-            // Ping wave overlay
+            // Ping wave overlay (centered on user)
             if viewModel.isPinging {
                 MapPingWave(isAnimating: viewModel.isPinging)
                     .allowsHitTesting(false)
             }
+        }
+    }
+
+    #if os(iOS)
+    /// Annotations for CompassMapView
+    private var compassAnnotations: [BeaconAnnotation] {
+        mapAnnotations.filter { !$0.isPongWave }.map { item in
+            BeaconAnnotation(
+                noiseKey: item.noiseKey,
+                nickname: item.nickname,
+                coordinate: item.coordinate,
+                isSelected: selectedFavoriteKey == item.noiseKey,
+                hasUWB: item.location?.uwbDistance != nil,
+                transport: item.location?.transport ?? .relay,
+                isPongWave: false
+            )
+        }
+    }
+    #endif
+
+    /// Convert pong waves to map annotation items
+    private var pongWaveAnnotations: [FavoriteMapItem] {
+        pongWaves.map { wave in
+            FavoriteMapItem(
+                noiseKey: Data(),  // Empty for wave items
+                nickname: "",
+                coordinate: wave.coordinate,
+                location: nil,
+                isPongWave: true,
+                waveId: wave.id
+            )
         }
     }
 
@@ -174,38 +281,73 @@ struct BeaconView: View {
             // Direction indicator
             directionArrowView(location: location)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(nickname)
                     .font(.bitchatSystem(size: 14, weight: .semibold, design: .monospaced))
                     .foregroundColor(textColor)
 
-                if let uwbDistance = location.uwbDistance {
-                    Text(formatDistance(Double(uwbDistance)))
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                } else if let accuracy = location.horizontalAccuracy {
-                    Text("±\(Int(accuracy))m")
-                        .font(.bitchatSystem(size: 12, design: .monospaced))
+                // GPS accuracy or dash
+                if location.hasLocation {
+                    if let accuracy = location.horizontalAccuracy {
+                        Text("GPS ±\(Int(accuracy))m")
+                            .font(.bitchatSystem(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text("GPS —")
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
 
-                // Staleness + connection info
-                HStack(spacing: 8) {
-                    let staleness = Date().timeIntervalSince(location.timestamp)
-                    Text(formatStaleness(staleness))
-                        .foregroundColor(staleness > 60 ? .orange : .secondary)
+                // Stats row: Transport + RSSI | Latency | UWB
+                HStack(spacing: 10) {
+                    // Transport: BLE with RSSI or Globe for relay
+                    HStack(spacing: 3) {
+                        if location.transport == .ble {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .foregroundColor(.green)
+                            if let rssi = location.peerRSSI {
+                                Text("\(rssi)dBm")
+                                    .foregroundColor(.green)
+                            }
+                        } else {
+                            Image(systemName: "globe")
+                                .foregroundColor(.purple)
+                        }
+                    }
 
-                    Text("•")
-                        .foregroundColor(.secondary)
-
-                    Image(systemName: location.transport == .ble ? "antenna.radiowaves.left.and.right" : "globe")
-                        .foregroundColor(location.transport == .ble ? .green : .purple)
-
-                    if location.pingMs > 0 {
-                        Text("\(location.pingMs)ms")
+                    // Latency
+                    HStack(spacing: 3) {
+                        Image(systemName: "timer")
+                            .foregroundColor(.orange)
+                        Text(location.pingMs > 0 ? "\(location.pingMs)ms" : "—")
                             .foregroundColor(.orange)
                     }
+
+                    // UWB status
+                    HStack(spacing: 3) {
+                        Image(systemName: "wave.3.forward")
+                            .foregroundColor(location.uwbDistance != nil ? .green : .secondary)
+                        if let uwbDistance = location.uwbDistance {
+                            Text(formatDistance(Double(uwbDistance)))
+                                .foregroundColor(.green)
+                                .fontWeight(.semibold)
+                        } else if location.uwbSupported {
+                            Text("ready")
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("—")
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
-                .font(.bitchatSystem(size: 11, design: .monospaced))
+                .font(.bitchatSystem(size: 10, design: .monospaced))
+
+                // Staleness
+                let staleness = Date().timeIntervalSince(location.timestamp)
+                Text(formatStaleness(staleness))
+                    .font(.bitchatSystem(size: 10, design: .monospaced))
+                    .foregroundColor(staleness > 60 ? .orange : .secondary)
             }
 
             Spacer()
@@ -225,24 +367,49 @@ struct BeaconView: View {
 
     private func directionArrowView(location: PeerLocation) -> some View {
         let hasUWB = location.uwbDistance != nil
-        let distance = location.uwbDistance.map { Double($0) } ?? 10.0
+        let distance = location.uwbDistance.map { Double($0) } ?? gpsDistance(to: location) ?? 100.0
         let arrowColor = getHotColdColor(distance: distance, hasUWB: hasUWB)
         let directionAngle = getDirectionAngle(location: location)
+        let hasDirection = hasUWB || (location.hasLocation && locationManager.currentLocation != nil)
 
         return ZStack {
             Circle()
                 .fill(arrowColor.opacity(0.2))
-                .frame(width: 44, height: 44)
+                .frame(width: 56, height: 56)
 
             Circle()
                 .stroke(arrowColor, lineWidth: 2)
-                .frame(width: 44, height: 44)
+                .frame(width: 56, height: 56)
 
-            Image(systemName: hasUWB ? "arrow.up" : "location.fill")
-                .font(.system(size: hasUWB ? 18 : 16, weight: .bold))
+            // Always show arrow if we have direction data
+            Image(systemName: "arrow.up")
+                .font(.system(size: 22, weight: .bold))
                 .foregroundColor(arrowColor)
-                .rotationEffect(.degrees(hasUWB ? directionAngle : 0))
+                .rotationEffect(.degrees(hasDirection ? directionAngle : 0))
+                .opacity(hasDirection ? 1.0 : 0.3)
+
+            // Distance label
+            if hasUWB, let uwbDist = location.uwbDistance {
+                Text(formatDistance(Double(uwbDist)))
+                    .font(.bitchatSystem(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundColor(arrowColor)
+                    .offset(y: 32)
+            } else if let gpsDist = gpsDistance(to: location) {
+                Text(formatDistance(gpsDist))
+                    .font(.bitchatSystem(size: 8, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .offset(y: 32)
+            }
         }
+    }
+
+    /// Calculate GPS distance to peer
+    private func gpsDistance(to location: PeerLocation) -> Double? {
+        guard let myLoc = locationManager.currentLocation,
+              let peerCoord = location.coordinate else { return nil }
+        let myCoord = CLLocation(latitude: myLoc.coordinate.latitude, longitude: myLoc.coordinate.longitude)
+        let peerLoc = CLLocation(latitude: peerCoord.latitude, longitude: peerCoord.longitude)
+        return myCoord.distance(from: peerLoc)
     }
 
     // MARK: - Favorites Section
@@ -354,7 +521,7 @@ struct BeaconView: View {
 
     private var filteredFavorites: [FavoriteDisplayItem] {
         favoritesService.favorites.compactMap { (key, relationship) in
-            guard relationship.isMutual else { return nil }
+            guard relationship.isFavorite else { return nil }
             let nick = relationship.peerNickname ?? "unknown"
             return FavoriteDisplayItem(noiseKey: key, nickname: nick)
         }
@@ -389,7 +556,7 @@ struct BeaconView: View {
             )
         }
 
-        let favCount = favoritesService.favorites.values.filter { $0.isMutual }.count
+        let favCount = favoritesService.favorites.values.filter { $0.isFavorite }.count
         if favCount > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 viewModel.pingAll()
@@ -425,8 +592,39 @@ struct BeaconView: View {
     }
 
     private func getDirectionAngle(location: PeerLocation) -> Double {
-        guard let direction = location.uwbDirection else { return 0 }
-        return Double(atan2(direction.x, direction.z)) * 180 / .pi
+        // Prefer UWB direction if available
+        if let direction = location.uwbDirection {
+            return Double(atan2(direction.x, direction.z)) * 180 / .pi
+        }
+
+        // Fall back to GPS bearing
+        guard let myLoc = locationManager.currentLocation,
+              let peerCoord = location.coordinate else { return 0 }
+
+        let bearing = calculateBearing(
+            from: myLoc.coordinate,
+            to: peerCoord
+        )
+
+        // Adjust for device heading if available
+        if let heading = locationManager.currentHeading {
+            return bearing - heading
+        }
+
+        return bearing
+    }
+
+    /// Calculate bearing from one coordinate to another (in degrees, 0 = North)
+    private func calculateBearing(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) -> Double {
+        let lat1 = from.latitude * .pi / 180
+        let lat2 = to.latitude * .pi / 180
+        let dLon = (to.longitude - from.longitude) * .pi / 180
+
+        let y = sin(dLon) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+
+        let bearing = atan2(y, x) * 180 / .pi
+        return bearing  // Returns -180 to 180
     }
 }
 
@@ -443,7 +641,24 @@ struct FavoriteMapItem: Identifiable {
     let nickname: String
     let coordinate: CLLocationCoordinate2D
     let location: PeerLocation?
-    var id: Data { noiseKey }
+    let isPongWave: Bool
+    let waveId: UUID?
+
+    init(noiseKey: Data, nickname: String, coordinate: CLLocationCoordinate2D, location: PeerLocation?, isPongWave: Bool = false, waveId: UUID? = nil) {
+        self.noiseKey = noiseKey
+        self.nickname = nickname
+        self.coordinate = coordinate
+        self.location = location
+        self.isPongWave = isPongWave
+        self.waveId = waveId
+    }
+
+    var id: String {
+        if let waveId = waveId {
+            return "wave-\(waveId.uuidString)"
+        }
+        return noiseKey.hexEncodedString()
+    }
 }
 
 // MARK: - Map Pin View

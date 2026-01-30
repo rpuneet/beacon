@@ -9,6 +9,7 @@ import Foundation
 import MapKit
 import SwiftUI
 import Combine
+import CoreLocation
 
 /// ViewModel for beacon UI state management
 @MainActor
@@ -19,11 +20,22 @@ final class BeaconViewModel: ObservableObject {
     @Published var mapRegion: MKCoordinateRegion
     @Published var showingPeerDetail: Bool = false
     @Published var userHasInteracted: Bool = false
+    @Published var followsHeading: Bool = false  // Compass heading mode
+
+    /// Whether beacon mode is enabled (auto-ping every 30s)
+    var isBeaconModeEnabled: Bool {
+        get { beaconService.isBeaconModeEnabled }
+        set {
+            beaconService.isBeaconModeEnabled = newValue
+            objectWillChange.send()
+        }
+    }
 
     // MARK: - Dependencies
 
     let beaconService: BeaconService
     let locationManager: LocationStateManager
+    let favoritesService: FavoritesPersistenceService
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -31,10 +43,12 @@ final class BeaconViewModel: ObservableObject {
 
     init(
         beaconService: BeaconService = .shared,
-        locationManager: LocationStateManager = .shared
+        locationManager: LocationStateManager = .shared,
+        favoritesService: FavoritesPersistenceService = .shared
     ) {
         self.beaconService = beaconService
         self.locationManager = locationManager
+        self.favoritesService = favoritesService
 
         // Center on user location or default
         if let loc = locationManager.currentLocation {
@@ -102,7 +116,27 @@ final class BeaconViewModel: ObservableObject {
         peersWithLocation.count
     }
 
+    /// Total number of all favorites
+    var favoritesCount: Int {
+        favoritesService.favorites.values.filter { $0.isFavorite }.count
+    }
+
+    /// Latest PONG wave for animation
+    var lastPongWave: (coordinate: CLLocationCoordinate2D, id: UUID)? {
+        beaconService.lastPongReceived
+    }
+
     // MARK: - Actions
+
+    /// Toggle beacon mode on/off
+    func toggleBeaconMode() {
+        isBeaconModeEnabled.toggle()
+    }
+
+    /// Stop beacon mode (call when view disappears)
+    func stopBeaconMode() {
+        isBeaconModeEnabled = false
+    }
 
     /// Send ping to all mutual favorites
     func pingAll() {

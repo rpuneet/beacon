@@ -1624,6 +1624,17 @@ extension BLEService: GossipSyncManager.Delegate {
             peers.values.compactMap { $0.isConnected ? $0.peerID : nil }
         }
     }
+
+    /// Get all connected peers with their noise public keys (for beacon feature)
+    /// Returns tuples of (ephemeral peerID for messaging, noise public key for identity)
+    func getConnectedPeersWithNoiseKeys() -> [(peerID: PeerID, noiseKey: Data)] {
+        return collectionsQueue.sync {
+            peers.values.compactMap { info in
+                guard info.isConnected, let noiseKey = info.noisePublicKey else { return nil }
+                return (peerID: info.peerID, noiseKey: noiseKey)
+            }
+        }
+    }
 }
 
 // MARK: - CBCentralManagerDelegate

@@ -51,9 +51,15 @@ struct ContentView: View {
     @State private var lastScrollTime: Date = .distantPast
     @State private var scrollThrottleTimer: Timer?
     @State private var autocompleteDebounceTimer: Timer?
-    @State private var showLocationChannelsSheet = false
-    @State private var showVerifySheet = false
-    @State private var showBeaconSheet = false
+    // Use enum for mutually exclusive sheets to avoid "only presenting single sheet" warning
+    private enum ActiveSheet: Identifiable {
+        case locationChannels
+        case verify
+        case beacon
+
+        var id: Int { hashValue }
+    }
+    @State private var activeSheet: ActiveSheet?
     @State private var expandedMessageIDs: Set<String> = []
     @State private var showLocationNotes = false
     @State private var notesGeohash: String? = nil
@@ -866,15 +872,7 @@ struct ContentView: View {
                         .foregroundColor(textColor)
                     Spacer()
                     if case .mesh = locationManager.selectedChannel {
-                        Button(action: { showBeaconSheet = true }) {
-                            Image(systemName: "location.circle")
-                                .font(.bitchatSystem(size: 14))
-                        }
-                        .buttonStyle(.plain)
-                        .help(
-                            String(localized: "content.help.beacon", comment: "Help text for beacon button")
-                        )
-                        Button(action: { showVerifySheet = true }) {
+                        Button(action: { activeSheet = .verify }) {
                             Image(systemName: "qrcode")
                                 .font(.bitchatSystem(size: 14))
                         }
@@ -887,7 +885,7 @@ struct ContentView: View {
                         withAnimation(.easeInOut(duration: TransportConfig.uiAnimationMediumSeconds)) {
                             dismiss()
                             showSidebar = false
-                            showVerifySheet = false
+                            activeSheet = nil
                             viewModel.endPrivateChat()
                         }
                     }) {
@@ -1300,6 +1298,19 @@ struct ContentView: View {
                     )
                 }
 
+                // Beacon button (mesh only), to the left of #mesh
+                if case .mesh = locationManager.selectedChannel {
+                    Button(action: { activeSheet = .beacon }) {
+                        Image(systemName: "location.circle")
+                            .font(.bitchatSystem(size: 12))
+                            .foregroundColor(Color.cyan.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(
+                        String(localized: "content.accessibility.beacon", comment: "Accessibility label for beacon button")
+                    )
+                }
+
                 // Bookmark toggle (geochats): to the left of #geohash
                 if case .location(let ch) = locationManager.selectedChannel {
                     Button(action: { bookmarks.toggle(ch.geohash) }) {
@@ -1317,7 +1328,7 @@ struct ContentView: View {
                 }
 
                 // Location channels button '#'
-                Button(action: { showLocationChannelsSheet = true }) {
+                Button(action: { activeSheet = .locationChannels }) {
                     let badgeText: String = {
                         switch locationManager.selectedChannel {
                         case .mesh: return "#mesh"
@@ -1374,22 +1385,29 @@ struct ContentView: View {
                     showSidebar.toggle()
                 }
             }
-            .sheet(isPresented: $showVerifySheet) {
-                VerificationSheetView(isPresented: $showVerifySheet)
-                    .environmentObject(viewModel)
-            }
-            .sheet(isPresented: $showBeaconSheet) {
-                BeaconView()
-                    .environmentObject(viewModel)
-            }
         }
         .frame(height: headerHeight)
         .padding(.horizontal, 12)
-        .sheet(isPresented: $showLocationChannelsSheet) {
-            LocationChannelsSheet(isPresented: $showLocationChannelsSheet)
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .verify:
+                VerificationSheetView(isPresented: Binding(
+                    get: { activeSheet == .verify },
+                    set: { if !$0 { activeSheet = nil } }
+                ))
+                .environmentObject(viewModel)
+            case .beacon:
+                BeaconView()
+                    .environmentObject(viewModel)
+            case .locationChannels:
+                LocationChannelsSheet(isPresented: Binding(
+                    get: { activeSheet == .locationChannels },
+                    set: { if !$0 { activeSheet = nil } }
+                ))
                 .environmentObject(viewModel)
                 .onAppear { viewModel.isLocationChannelsSheetPresented = true }
                 .onDisappear { viewModel.isLocationChannelsSheetPresented = false }
+            }
         }
         .sheet(isPresented: $showLocationNotes, onDismiss: {
             notesGeohash = nil
