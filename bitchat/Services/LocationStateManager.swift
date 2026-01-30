@@ -60,6 +60,12 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     @Published var teleported: Bool = false
     @Published private(set) var locationNames: [GeohashChannelLevel: String] = [:]
 
+    // MARK: - Published State (Heading for Beacon)
+
+    /// Current device heading in degrees (0 = North, 90 = East)
+    @Published private(set) var currentHeading: Double?
+    private var headingObserverCount = 0
+
     // MARK: - Published State (Bookmarks)
 
     @Published private(set) var bookmarks: [String] = []
@@ -383,6 +389,40 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         SecureLogger.error("LocationStateManager: location error: \(error.localizedDescription)", category: .session)
+    }
+
+    #if os(iOS)
+    func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        // Use true heading if available, otherwise magnetic
+        let heading = newHeading.trueHeading >= 0 ? newHeading.trueHeading : newHeading.magneticHeading
+        Task { @MainActor in
+            self.currentHeading = heading
+        }
+    }
+    #endif
+
+    // MARK: - Heading Updates (for Beacon tracking)
+
+    /// Start receiving heading updates (call when entering tracking mode)
+    func startHeadingUpdates() {
+        #if os(iOS)
+        headingObserverCount += 1
+        if headingObserverCount == 1 {
+            cl.headingFilter = 5 // Update every 5 degrees
+            cl.startUpdatingHeading()
+        }
+        #endif
+    }
+
+    /// Stop receiving heading updates (call when leaving tracking mode)
+    func stopHeadingUpdates() {
+        #if os(iOS)
+        headingObserverCount = max(0, headingObserverCount - 1)
+        if headingObserverCount == 0 {
+            cl.stopUpdatingHeading()
+            Task { @MainActor in self.currentHeading = nil }
+        }
+        #endif
     }
 
     // MARK: - Private Helpers (Permission)

@@ -118,6 +118,21 @@ final class HapticManager {
         #endif
     }
 
+    /// Generic impact feedback with intensity level
+    enum ImpactStyle {
+        case light, medium, heavy
+    }
+
+    func impact(_ style: ImpactStyle) {
+        #if os(iOS)
+        switch style {
+        case .light: impactLight.impactOccurred()
+        case .medium: impactMedium.impactOccurred()
+        case .heavy: impactHeavy.impactOccurred()
+        }
+        #endif
+    }
+
     /// Warning notification
     func warning() {
         #if os(iOS)

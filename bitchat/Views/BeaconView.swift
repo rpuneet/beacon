@@ -19,6 +19,7 @@ struct BeaconView: View {
     @State private var selectedFavoriteKey: Data?
     @State private var pongWaves: [PongWaveItem] = []
     @State private var lastPongId: UUID?
+    @State private var showingTrackingView: Bool = false
 
     private var textColor: Color {
         colorScheme == .dark ? .green : Color(red: 0, green: 0.5, blue: 0)
@@ -91,6 +92,20 @@ struct BeaconView: View {
                 }
             }
         }
+        #if os(iOS)
+        .fullScreenCover(isPresented: $showingTrackingView) {
+            if let location = selectedLocation {
+                TrackingView(
+                    peerLocation: location,
+                    peerName: selectedNickname,
+                    onDismiss: {
+                        showingTrackingView = false
+                        selectedFavoriteKey = nil
+                    }
+                )
+            }
+        }
+        #endif
     }
 
     // MARK: - Header
@@ -544,6 +559,10 @@ struct BeaconView: View {
                 viewModel.mapRegion.center = coord
             }
         }
+        #if os(iOS)
+        // Show full-screen tracking view on iOS
+        showingTrackingView = true
+        #endif
     }
 
     private func startBeacon() {
