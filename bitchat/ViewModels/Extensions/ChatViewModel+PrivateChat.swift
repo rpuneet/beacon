@@ -220,7 +220,8 @@ extension ChatViewModel {
         
         // Check if this is a beacon PING/PONG message (from Nostr)
         if pm.content.hasPrefix("[PING]:") || pm.content.hasPrefix("[PONG]:") {
-            BeaconService.shared.handlePrivateMessage(from: convKey, content: pm.content, transport: .relay)
+            let noiseKey = Data(hexString: senderPubkey)
+            BeaconService.shared.handlePrivateMessage(from: convKey, senderNoiseKey: noiseKey, content: pm.content, transport: .relay)
             return  // Don't store as a regular message
         }
 
@@ -602,7 +603,7 @@ extension ChatViewModel {
 
         // Check if this is a beacon PING/PONG message (from Nostr stable key path)
         if messageContent.hasPrefix("[PING]:") || messageContent.hasPrefix("[PONG]:") {
-            BeaconService.shared.handlePrivateMessage(from: targetPeerID, content: messageContent, transport: .relay)
+            BeaconService.shared.handlePrivateMessage(from: targetPeerID, senderNoiseKey: actualSenderNoiseKey, content: messageContent, transport: .relay)
             return  // Don't store as a regular message
         }
 
@@ -698,7 +699,8 @@ extension ChatViewModel {
 
         // Check if this is a beacon PING/PONG message
         if message.content.hasPrefix("[PING]:") || message.content.hasPrefix("[PONG]:") {
-            BeaconService.shared.handlePrivateMessage(from: peerID, content: message.content, transport: .ble)
+            let noiseKey = unifiedPeerService.getPeer(by: peerID)?.noisePublicKey
+            BeaconService.shared.handlePrivateMessage(from: peerID, senderNoiseKey: noiseKey, content: message.content, transport: .ble)
             return  // Don't store as a regular message
         }
         
