@@ -25,6 +25,9 @@ struct CompassMapView: UIViewRepresentable {
         mapView.showsUserLocation = showsUserLocation
         mapView.showsCompass = true
         mapView.isRotateEnabled = true
+        mapView.isZoomEnabled = true
+        mapView.isScrollEnabled = true
+        mapView.isPitchEnabled = false  // Keep 2D for clarity
 
         // Enable heading tracking if requested
         if followsHeading {
