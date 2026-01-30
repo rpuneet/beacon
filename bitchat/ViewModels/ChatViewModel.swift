@@ -443,9 +443,9 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, CommandContextProv
         self.autocompleteService = AutocompleteService()
         self.deduplicationService = MessageDeduplicationService()
 
-        // Configure BeaconService with transports
+        // Configure BeaconService with BLE transport
         if let bleService = transport as? BLEService {
-            BeaconService.shared.configure(ble: bleService, nostr: nostrTransport)
+            BeaconService.shared.configure(ble: bleService)
         }
 
         // Wire up dependencies

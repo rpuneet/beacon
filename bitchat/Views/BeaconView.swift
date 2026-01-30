@@ -601,17 +601,10 @@ struct BeaconView: View {
         guard let myLoc = locationManager.currentLocation,
               let peerCoord = location.coordinate else { return 0 }
 
-        let bearing = calculateBearing(
+        return calculateBearing(
             from: myLoc.coordinate,
             to: peerCoord
         )
-
-        // Adjust for device heading if available
-        if let heading = locationManager.currentHeading {
-            return bearing - heading
-        }
-
-        return bearing
     }
 
     /// Calculate bearing from one coordinate to another (in degrees, 0 = North)
