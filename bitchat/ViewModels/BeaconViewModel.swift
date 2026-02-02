@@ -2,44 +2,25 @@
 // BeaconViewModel.swift
 // bitchat
 //
-// UI state management for the beacon feature
+// UI state management for the beacon feature (legacy - kept for compatibility)
 //
 
 import Foundation
 import MapKit
-import SwiftUI
 import Combine
-import CoreLocation
 
-/// ViewModel for beacon UI state management
+/// ViewModel for beacon UI state (simplified - most logic now in BeaconService)
 @MainActor
 final class BeaconViewModel: ObservableObject {
-    // MARK: - Published State
-
-    @Published var selectedPeerID: String?
     @Published var mapRegion: MKCoordinateRegion
-    @Published var showingPeerDetail: Bool = false
     @Published var userHasInteracted: Bool = false
-    @Published var followsHeading: Bool = false  // Compass heading mode
-
-    /// Whether beacon mode is enabled (auto-ping every 30s)
-    var isBeaconModeEnabled: Bool {
-        get { beaconService.isBeaconModeEnabled }
-        set {
-            beaconService.isBeaconModeEnabled = newValue
-            objectWillChange.send()
-        }
-    }
-
-    // MARK: - Dependencies
+    @Published var followsHeading: Bool = true
 
     let beaconService: BeaconService
     let locationManager: LocationStateManager
     let favoritesService: FavoritesPersistenceService
 
     private var cancellables = Set<AnyCancellable>()
-
-    // MARK: - Initialization
 
     init(
         beaconService: BeaconService = .shared,
@@ -50,7 +31,6 @@ final class BeaconViewModel: ObservableObject {
         self.locationManager = locationManager
         self.favoritesService = favoritesService
 
-        // Center on user location or default
         if let loc = locationManager.currentLocation {
             self.mapRegion = MKCoordinateRegion(
                 center: loc.coordinate,
@@ -66,155 +46,28 @@ final class BeaconViewModel: ObservableObject {
         setupObservers()
     }
 
-    // MARK: - Computed Properties
-
-    /// Current user location
-    var myLocation: CLLocationCoordinate2D? {
-        locationManager.currentLocation?.coordinate
+    var isBeaconModeEnabled: Bool {
+        get { beaconService.isBeaconModeEnabled }
+        set { beaconService.isBeaconModeEnabled = newValue }
     }
 
-    /// All peers with valid location data
-    var peersWithLocation: [PeerLocation] {
-        beaconService.peerLocations.values
-            .filter { $0.hasLocation }
-            .sorted { $0.timestamp > $1.timestamp }
-    }
+    var isPinging: Bool { beaconService.isPinging }
+    var peersWithLocationCount: Int { beaconService.peersWithLocationCount }
+    var favoritesCount: Int { favoritesService.favorites.values.filter { $0.isFavorite }.count }
 
-    /// All peer locations (including those without GPS)
-    var allPeerLocations: [PeerLocation] {
-        Array(beaconService.peerLocations.values)
-            .sorted { $0.timestamp > $1.timestamp }
-    }
-
-    /// Selected peer location if any
-    var selectedPeerLocation: PeerLocation? {
-        guard let id = selectedPeerID else { return nil }
-        return beaconService.peerLocations[id]
-    }
-
-    /// Title for the ping button based on state
-    var pingButtonTitle: String {
-        switch beaconService.pingState {
-        case .idle:
-            return "Ping Friends"
-        case .pinging(let sent, let received):
-            return "Pinging... (\(received)/\(sent))"
-        case .completed(let received, let total):
-            return "\(received)/\(total) responded"
-        case .failed(let msg):
-            return "Failed: \(msg)"
-        }
-    }
-
-    /// Whether a ping is currently in progress
-    var isPinging: Bool {
-        beaconService.isPinging
-    }
-
-    /// Number of peers with location
-    var peersWithLocationCount: Int {
-        peersWithLocation.count
-    }
-
-    /// Total number of all favorites
-    var favoritesCount: Int {
-        favoritesService.favorites.values.filter { $0.isFavorite }.count
-    }
-
-    /// Latest PONG wave for animation
-    var lastPongWave: (coordinate: CLLocationCoordinate2D, id: UUID)? {
-        beaconService.lastPongReceived
-    }
-
-    // MARK: - Actions
-
-    /// Toggle beacon mode on/off
-    func toggleBeaconMode() {
-        isBeaconModeEnabled.toggle()
-    }
-
-    /// Stop beacon mode (call when view disappears)
-    func stopBeaconMode() {
-        isBeaconModeEnabled = false
-    }
-
-    /// Send ping to all mutual favorites
-    func pingAll() {
-        beaconService.pingAllFavorites()
-    }
-
-    /// Select a peer and show details
-    func selectPeer(_ peerIDString: String) {
-        selectedPeerID = peerIDString
-        showingPeerDetail = true
-
-        // Center map on peer
-        if let location = beaconService.peerLocations[peerIDString]?.coordinate {
-            mapRegion.center = location
-        }
-    }
-
-    /// Deselect the currently selected peer
-    func deselectPeer() {
-        selectedPeerID = nil
-        showingPeerDetail = false
-    }
-
-    /// Center the map on the user's location
-    func centerOnUser() {
-        if let loc = myLocation {
-            mapRegion.center = loc
-        }
-    }
-
-    /// Update map region to fit all peers
-    func fitAllPeers() {
-        guard !peersWithLocation.isEmpty else { return }
-
-        // Include user location in the region calculation
-        var coordinates = peersWithLocation.compactMap { $0.coordinate }
-        if let myLoc = myLocation {
-            coordinates.append(myLoc)
-        }
-
-        guard !coordinates.isEmpty else { return }
-
-        // Calculate bounding box
-        let minLat = coordinates.map { $0.latitude }.min() ?? 0
-        let maxLat = coordinates.map { $0.latitude }.max() ?? 0
-        let minLon = coordinates.map { $0.longitude }.min() ?? 0
-        let maxLon = coordinates.map { $0.longitude }.max() ?? 0
-
-        let center = CLLocationCoordinate2D(
-            latitude: (minLat + maxLat) / 2,
-            longitude: (minLon + maxLon) / 2
-        )
-
-        let latDelta = max(0.01, (maxLat - minLat) * 1.5)
-        let lonDelta = max(0.01, (maxLon - minLon) * 1.5)
-
-        mapRegion = MKCoordinateRegion(
-            center: center,
-            span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lonDelta)
-        )
-    }
-
-    // MARK: - Private Methods
+    func toggleBeaconMode() { isBeaconModeEnabled.toggle() }
+    func stopBeaconMode() { isBeaconModeEnabled = false }
+    func pingAll() { beaconService.pingAllFavorites() }
 
     private func setupObservers() {
-        // Observe location changes to update UI
         beaconService.$peerLocations
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        beaconService.$pingState
+        beaconService.$isPinging
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
     }
 }

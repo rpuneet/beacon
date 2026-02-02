@@ -2,22 +2,30 @@
 // CompassMapView.swift
 // bitchat
 //
-// MKMapView wrapper with compass heading support for beacon
+// Simple MKMapView wrapper for beacon
 //
 
-#if os(iOS)
 import SwiftUI
 import MapKit
+
+// MARK: - Shared Types (available on all platforms)
+
+struct BeaconAnnotation: Identifiable {
+    let noiseKey: Data
+    let nickname: String
+    let coordinate: CLLocationCoordinate2D
+    let transport: PeerLocation.TransportType
+    var id: String { noiseKey.hexEncodedString() }
+}
+
+#if os(iOS)
 import CoreLocation
 
-/// Map view that rotates based on device heading
 struct CompassMapView: UIViewRepresentable {
     @Binding var region: MKCoordinateRegion
     let annotations: [BeaconAnnotation]
     let showsUserLocation: Bool
-    let followsHeading: Bool
     let onAnnotationTap: (Data) -> Void
-    let onMapInteraction: () -> Void
 
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
@@ -27,72 +35,32 @@ struct CompassMapView: UIViewRepresentable {
         mapView.isRotateEnabled = true
         mapView.isZoomEnabled = true
         mapView.isScrollEnabled = true
-        mapView.isPitchEnabled = false  // Keep 2D for clarity
-
-        // Enable heading tracking if requested
-        if followsHeading {
-            mapView.userTrackingMode = .followWithHeading
-        }
-
-        // Register annotation view
-        mapView.register(BeaconAnnotationView.self, forAnnotationViewWithReuseIdentifier: BeaconAnnotationView.reuseIdentifier)
-
+        mapView.isPitchEnabled = false
+        mapView.userTrackingMode = .followWithHeading
+        mapView.setRegion(region, animated: false)
+        mapView.register(BeaconAnnotationView.self, forAnnotationViewWithReuseIdentifier: "beacon")
         return mapView
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
-        // Update region if not following heading (user interaction)
-        if !followsHeading {
-            let currentCenter = mapView.region.center
-            let newCenter = region.center
-            let distance = CLLocation(latitude: currentCenter.latitude, longitude: currentCenter.longitude)
-                .distance(from: CLLocation(latitude: newCenter.latitude, longitude: newCenter.longitude))
-
-            // Only update if significantly different to avoid jitter
-            if distance > 10 {
-                mapView.setRegion(region, animated: true)
-            }
-        }
-
-        // Update tracking mode
-        if followsHeading && mapView.userTrackingMode != .followWithHeading {
-            mapView.userTrackingMode = .followWithHeading
-        } else if !followsHeading && mapView.userTrackingMode == .followWithHeading {
-            mapView.userTrackingMode = .follow
-        }
-
-        // Update annotations
-        updateAnnotations(mapView: mapView, context: context)
+        updateAnnotations(mapView: mapView)
     }
 
-    private func updateAnnotations(mapView: MKMapView, context: Context) {
-        // Get existing annotations (excluding user location)
-        let existingAnnotations = mapView.annotations.compactMap { $0 as? BeaconPointAnnotation }
-        let existingIds = Set(existingAnnotations.map { $0.noiseKeyHex })
+    private func updateAnnotations(mapView: MKMapView) {
+        let existing = mapView.annotations.compactMap { $0 as? BeaconPointAnnotation }
+        let existingIds = Set(existing.map { $0.noiseKeyHex })
         let newIds = Set(annotations.map { $0.noiseKey.hexEncodedString() })
 
-        // Remove old annotations
-        let toRemove = existingAnnotations.filter { !newIds.contains($0.noiseKeyHex) }
-        mapView.removeAnnotations(toRemove)
+        mapView.removeAnnotations(existing.filter { !newIds.contains($0.noiseKeyHex) })
 
-        // Add new annotations
-        let toAdd = annotations.filter { !existingIds.contains($0.noiseKey.hexEncodedString()) }
-        for annotation in toAdd {
-            let pointAnnotation = BeaconPointAnnotation(annotation: annotation)
-            mapView.addAnnotation(pointAnnotation)
+        for ann in annotations where !existingIds.contains(ann.noiseKey.hexEncodedString()) {
+            mapView.addAnnotation(BeaconPointAnnotation(annotation: ann))
         }
 
-        // Update existing annotations
-        for existing in existingAnnotations {
+        for existing in existing {
             if let updated = annotations.first(where: { $0.noiseKey.hexEncodedString() == existing.noiseKeyHex }) {
                 existing.coordinate = updated.coordinate
                 existing.title = updated.nickname
-                existing.isSelected = updated.isSelected
-                existing.hasUWB = updated.hasUWB
-                existing.transport = updated.transport
-                existing.isPongWave = updated.isPongWave
-
-                // Refresh view
                 if let view = mapView.view(for: existing) as? BeaconAnnotationView {
                     view.configure(with: existing)
                 }
@@ -100,71 +68,36 @@ struct CompassMapView: UIViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     class Coordinator: NSObject, MKMapViewDelegate {
         var parent: CompassMapView
 
-        init(_ parent: CompassMapView) {
-            self.parent = parent
-        }
-
-        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-            DispatchQueue.main.async {
-                self.parent.region = mapView.region
-            }
-        }
+        init(_ parent: CompassMapView) { self.parent = parent }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
-            guard let beaconAnnotation = annotation as? BeaconPointAnnotation else { return nil }
-
-            let view = mapView.dequeueReusableAnnotationView(withIdentifier: BeaconAnnotationView.reuseIdentifier, for: annotation) as! BeaconAnnotationView
-            view.configure(with: beaconAnnotation)
+            guard let beacon = annotation as? BeaconPointAnnotation else { return nil }
+            let view = mapView.dequeueReusableAnnotationView(withIdentifier: "beacon", for: annotation) as! BeaconAnnotationView
+            view.configure(with: beacon)
             return view
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
-            guard let annotation = view.annotation as? BeaconPointAnnotation else { return }
-            if let noiseKey = Data(hexString: annotation.noiseKeyHex) {
-                parent.onAnnotationTap(noiseKey)
-            }
-        }
-
-        func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
-            parent.onMapInteraction()
+            guard let ann = view.annotation as? BeaconPointAnnotation,
+                  let key = Data(hexString: ann.noiseKeyHex) else { return }
+            parent.onAnnotationTap(key)
+            mapView.deselectAnnotation(ann, animated: false)
         }
     }
 }
 
-// MARK: - Supporting Types
-
-struct BeaconAnnotation: Identifiable {
-    let noiseKey: Data
-    let nickname: String
-    let coordinate: CLLocationCoordinate2D
-    let isSelected: Bool
-    let hasUWB: Bool
-    let transport: PeerLocation.TransportType
-    let isPongWave: Bool
-
-    var id: String { noiseKey.hexEncodedString() }
-}
-
 class BeaconPointAnnotation: MKPointAnnotation {
     let noiseKeyHex: String
-    var isSelected: Bool
-    var hasUWB: Bool
     var transport: PeerLocation.TransportType
-    var isPongWave: Bool
 
     init(annotation: BeaconAnnotation) {
         self.noiseKeyHex = annotation.noiseKey.hexEncodedString()
-        self.isSelected = annotation.isSelected
-        self.hasUWB = annotation.hasUWB
         self.transport = annotation.transport
-        self.isPongWave = annotation.isPongWave
         super.init()
         self.coordinate = annotation.coordinate
         self.title = annotation.nickname
@@ -172,40 +105,33 @@ class BeaconPointAnnotation: MKPointAnnotation {
 }
 
 class BeaconAnnotationView: MKAnnotationView {
-    static let reuseIdentifier = "BeaconAnnotationView"
-
-    private var hostingController: UIHostingController<BeaconMapPin>?
-
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         self.canShowCallout = false
-        self.frame = CGRect(x: 0, y: 0, width: 50, height: 60)
+        self.frame = CGRect(x: 0, y: 0, width: 40, height: 40)
     }
 
-    required init?(coder aDecoder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    required init?(coder: NSCoder) { fatalError() }
 
     func configure(with annotation: BeaconPointAnnotation) {
-        // Remove old hosting controller
-        hostingController?.view.removeFromSuperview()
+        let size: CGFloat = 32
+        UIGraphicsBeginImageContextWithOptions(CGSize(width: size, height: size), false, 0)
+        let ctx = UIGraphicsGetCurrentContext()!
 
-        // Create SwiftUI view
-        let pinView = BeaconMapPin(
-            nickname: annotation.title ?? "",
-            isSelected: annotation.isSelected,
-            hasUWB: annotation.hasUWB,
-            transport: annotation.transport
-        )
+        let color = annotation.transport == .ble ? UIColor.systemGreen : UIColor.systemPurple
+        ctx.setFillColor(color.cgColor)
+        ctx.fillEllipse(in: CGRect(x: 0, y: 0, width: size, height: size))
 
-        let controller = UIHostingController(rootView: pinView)
-        controller.view.backgroundColor = .clear
-        controller.view.frame = self.bounds
-        self.addSubview(controller.view)
-        self.hostingController = controller
+        let config = UIImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+        if let icon = UIImage(systemName: "person.fill", withConfiguration: config)?.withTintColor(.white, renderingMode: .alwaysOriginal) {
+            let iconSize = icon.size
+            let iconRect = CGRect(x: (size - iconSize.width) / 2, y: (size - iconSize.height) / 2, width: iconSize.width, height: iconSize.height)
+            icon.draw(in: iconRect)
+        }
 
-        // Adjust anchor
-        self.centerOffset = CGPoint(x: 0, y: -self.frame.height / 2)
+        self.image = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        self.centerOffset = CGPoint(x: 0, y: -size / 2)
     }
 }
 #endif
