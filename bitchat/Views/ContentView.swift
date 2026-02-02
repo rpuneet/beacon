@@ -1301,9 +1301,7 @@ struct ContentView: View {
                 // Beacon button (mesh only), to the left of #mesh
                 if case .mesh = locationManager.selectedChannel {
                     Button(action: { activeSheet = .beacon }) {
-                        Image(systemName: "location.circle")
-                            .font(.bitchatSystem(size: 12))
-                            .foregroundColor(Color.cyan.opacity(0.8))
+                        BeaconIcon(size: 14)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(

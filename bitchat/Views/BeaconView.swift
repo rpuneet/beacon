@@ -129,40 +129,124 @@ struct BeaconView: View {
     // MARK: - Map
 
     private var mapView: some View {
-        #if os(iOS)
-        CompassMapView(
-            region: $mapRegion,
-            annotations: mapAnnotations,
-            showsUserLocation: true,
-            onAnnotationTap: { key in
-                if selectedFavoriteKey == key {
-                    stopTracking()
-                } else {
-                    startTracking(key)
-                }
-            }
-        )
-        #else
-        Map(coordinateRegion: $mapRegion, showsUserLocation: true, annotationItems: mapAnnotations) { item in
-            MapAnnotation(coordinate: item.coordinate) {
-                Circle()
-                    .fill(item.transport == .ble ? Color.green : Color.purple)
-                    .frame(width: 24, height: 24)
-                    .overlay(
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 12))
-                            .foregroundColor(.white)
-                    )
-                    .onTapGesture {
-                        if selectedFavoriteKey == item.noiseKey {
+        GeometryReader { geo in
+            ZStack {
+                #if os(iOS)
+                CompassMapView(
+                    region: $mapRegion,
+                    annotations: mapAnnotations,
+                    showsUserLocation: true,
+                    onAnnotationTap: { key in
+                        if selectedFavoriteKey == key {
                             stopTracking()
                         } else {
-                            startTracking(item.noiseKey)
+                            startTracking(key)
                         }
                     }
+                )
+                #else
+                Map(coordinateRegion: $mapRegion, showsUserLocation: true, annotationItems: mapAnnotations) { item in
+                    MapAnnotation(coordinate: item.coordinate) {
+                        Circle()
+                            .fill(item.transport == .ble ? Color.green : Color.purple)
+                            .frame(width: 24, height: 24)
+                            .overlay(
+                                Image(systemName: "person.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.white)
+                            )
+                            .onTapGesture {
+                                if selectedFavoriteKey == item.noiseKey {
+                                    stopTracking()
+                                } else {
+                                    startTracking(item.noiseKey)
+                                }
+                            }
+                    }
+                }
+                #endif
+
+                // Off-screen peer indicators
+                ForEach(offScreenIndicators(in: geo.size), id: \.noiseKey) { indicator in
+                    offScreenArrow(indicator: indicator)
+                        .position(indicator.position)
+                }
             }
         }
-        #endif
+    }
+
+    // MARK: - Off-screen Indicators
+
+    private struct OffScreenIndicator {
+        let noiseKey: Data
+        let nickname: String
+        let position: CGPoint
+        let angle: Double
+        let transport: PeerLocation.TransportType
+    }
+
+    private func offScreenIndicators(in size: CGSize) -> [OffScreenIndicator] {
+        guard let userLoc = locationManager.currentLocation else { return [] }
+
+        let margin: CGFloat = 30
+        var indicators: [OffScreenIndicator] = []
+
+        for ann in mapAnnotations {
+            // Check if annotation is in visible region
+            let latDelta = mapRegion.span.latitudeDelta / 2
+            let lonDelta = mapRegion.span.longitudeDelta / 2
+            let minLat = mapRegion.center.latitude - latDelta
+            let maxLat = mapRegion.center.latitude + latDelta
+            let minLon = mapRegion.center.longitude - lonDelta
+            let maxLon = mapRegion.center.longitude + lonDelta
+
+            let isVisible = ann.coordinate.latitude >= minLat && ann.coordinate.latitude <= maxLat &&
+                           ann.coordinate.longitude >= minLon && ann.coordinate.longitude <= maxLon
+
+            if !isVisible {
+                // Calculate angle from center to peer
+                let dLat = ann.coordinate.latitude - mapRegion.center.latitude
+                let dLon = ann.coordinate.longitude - mapRegion.center.longitude
+                let angle = atan2(dLon, dLat)
+
+                // Calculate position on edge
+                let centerX = size.width / 2
+                let centerY = size.height / 2
+                let maxRadius = min(centerX, centerY) - margin
+
+                var x = centerX + maxRadius * CGFloat(sin(angle))
+                var y = centerY - maxRadius * CGFloat(cos(angle))
+
+                // Clamp to edges
+                x = max(margin, min(size.width - margin, x))
+                y = max(margin, min(size.height - margin, y))
+
+                indicators.append(OffScreenIndicator(
+                    noiseKey: ann.noiseKey,
+                    nickname: ann.nickname,
+                    position: CGPoint(x: x, y: y),
+                    angle: angle * 180 / .pi,
+                    transport: ann.transport
+                ))
+            }
+        }
+        return indicators
+    }
+
+    private func offScreenArrow(indicator: OffScreenIndicator) -> some View {
+        let color: Color = indicator.transport == .ble ? .green : .purple
+        return ZStack {
+            Circle()
+                .fill(color.opacity(0.3))
+                .frame(width: 28, height: 28)
+            Image(systemName: "arrow.up")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(color)
+                .rotationEffect(.degrees(indicator.angle))
+        }
+        .onTapGesture {
+            startTracking(indicator.noiseKey)
+        }
     }
 
     private var mapAnnotations: [BeaconAnnotation] {
