@@ -25,6 +25,7 @@ struct CompassMapView: UIViewRepresentable {
     @Binding var region: MKCoordinateRegion
     let annotations: [BeaconAnnotation]
     let showsUserLocation: Bool
+    let fitCoordinates: [CLLocationCoordinate2D]?  // Fit map to show these coordinates
     let onAnnotationTap: (Data) -> Void
 
     func makeUIView(context: Context) -> MKMapView {
@@ -37,13 +38,28 @@ struct CompassMapView: UIViewRepresentable {
         mapView.isScrollEnabled = true
         mapView.isPitchEnabled = false
         mapView.userTrackingMode = .followWithHeading
-        mapView.setRegion(region, animated: false)
         mapView.register(BeaconAnnotationView.self, forAnnotationViewWithReuseIdentifier: "beacon")
         return mapView
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
         updateAnnotations(mapView: mapView)
+
+        // Fit to coordinates if provided
+        if let coords = fitCoordinates, !coords.isEmpty {
+            let mapRect = coords.reduce(MKMapRect.null) { rect, coord in
+                let point = MKMapPoint(coord)
+                let pointRect = MKMapRect(x: point.x - 100, y: point.y - 100, width: 200, height: 200)
+                return rect.union(pointRect)
+            }
+            let padding = UIEdgeInsets(top: 60, left: 40, bottom: 120, right: 40)
+            mapView.setVisibleMapRect(mapRect, edgePadding: padding, animated: true)
+            context.coordinator.lastFitCoords = coords
+        } else if context.coordinator.lastFitCoords != nil {
+            // Switched back to no fit - return to user tracking
+            context.coordinator.lastFitCoords = nil
+            mapView.userTrackingMode = .followWithHeading
+        }
     }
 
     private func updateAnnotations(mapView: MKMapView) {
@@ -72,6 +88,7 @@ struct CompassMapView: UIViewRepresentable {
 
     class Coordinator: NSObject, MKMapViewDelegate {
         var parent: CompassMapView
+        var lastFitCoords: [CLLocationCoordinate2D]?
 
         init(_ parent: CompassMapView) { self.parent = parent }
 

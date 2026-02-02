@@ -136,6 +136,7 @@ struct BeaconView: View {
                     region: $mapRegion,
                     annotations: mapAnnotations,
                     showsUserLocation: true,
+                    fitCoordinates: fitCoordinatesForTracking,
                     onAnnotationTap: { key in
                         if selectedFavoriteKey == key {
                             stopTracking()
@@ -254,6 +255,13 @@ struct BeaconView: View {
             guard let loc = getLocation(for: fav.noiseKey), let coord = loc.coordinate else { return nil }
             return BeaconAnnotation(noiseKey: fav.noiseKey, nickname: fav.nickname, coordinate: coord, transport: loc.transport)
         }
+    }
+
+    /// When tracking, fit both user and peer in the map
+    private var fitCoordinatesForTracking: [CLLocationCoordinate2D]? {
+        guard let peerCoord = selectedLocation?.coordinate,
+              let myLoc = locationManager.currentLocation else { return nil }
+        return [myLoc.coordinate, peerCoord]
     }
 
     // MARK: - Tracking Overlay
