@@ -173,6 +173,19 @@ extension ChatViewModel {
         case .verifyChallenge, .verifyResponse:
             // QR verification payloads over Nostr are not supported; ignore in geohash DMs
             break
+        case .trackRequest:
+            // Respond with our GPS location
+            handleTrackRequest(noisePayload, senderPubkey: senderPubkey, convKey: convKey, id: id)
+        case .trackResponse:
+            // Forward to NostrTransport to complete pending request
+            handleTrackResponseFromNostr(noisePayload)
+        case .locationAnnounce:
+            // Handle location announcement via embedded packet
+            if let announce = LocationAnnounce.fromBinaryData(noisePayload.data) {
+                Task { @MainActor in
+                    nostrTransport.handleLocationAnnounce(from: convKey, announce: announce)
+                }
+            }
         }
     }
 
@@ -400,10 +413,23 @@ extension ChatViewModel {
             handleDelivered(payload, senderPubkey: senderPubkey, convKey: convKey)
         case .readReceipt:
             handleReadReceipt(payload, senderPubkey: senderPubkey, convKey: convKey)
-        
+
         // Explicitly list other cases so we get compile-time check if a new case is added in the future
         case .verifyChallenge, .verifyResponse:
             break
+        case .trackRequest:
+            // Respond with our GPS location
+            handleTrackRequest(payload, senderPubkey: senderPubkey, convKey: convKey, id: id)
+        case .trackResponse:
+            // Forward to NostrTransport to complete pending request
+            handleTrackResponseFromNostr(payload)
+        case .locationAnnounce:
+            // Handle location announcement via embedded packet
+            if let announce = LocationAnnounce.fromBinaryData(payload.data) {
+                Task { @MainActor in
+                    nostrTransport.handleLocationAnnounce(from: convKey, announce: announce)
+                }
+            }
         }
     }
 
@@ -573,28 +599,40 @@ extension ChatViewModel {
 
     func setupNostrMessageHandling() {
         guard let currentIdentity = try? idBridge.getCurrentNostrIdentity() else {
-            SecureLogger.warning("⚠️ No Nostr identity available for message handling", category: .session)
+            SecureLogger.warning("⚠️ setupNostrMessageHandling: No Nostr identity available", category: .session)
             return
         }
-        
-        SecureLogger.debug("🔑 Setting up Nostr subscription for pubkey: \(currentIdentity.publicKeyHex.prefix(16))...", category: .session)
-        
+
+        guard let relayMgr = nostrRelayManager else {
+            SecureLogger.warning("⚠️ setupNostrMessageHandling: No relay manager available", category: .session)
+            return
+        }
+
+        SecureLogger.info("📋 setupNostrMessageHandling: Setting up gift wrap subscription for pubkey: \(currentIdentity.publicKeyHex) (full)", category: .session)
+        SecureLogger.info("📋 setupNostrMessageHandling: npub=\(currentIdentity.npub)", category: .session)
+
         // Subscribe to Nostr messages
         let filter = NostrFilter.giftWrapsFor(
             pubkey: currentIdentity.publicKeyHex,
             since: Date().addingTimeInterval(-TransportConfig.nostrDMSubscribeLookbackSeconds)  // Last 24 hours
         )
-        
-        nostrRelayManager?.subscribe(filter: filter, id: "chat-messages") { [weak self] event in
+        SecureLogger.info("📋 setupNostrMessageHandling: filter p-tag=\(currentIdentity.publicKeyHex)", category: .session)
+
+        relayMgr.subscribe(filter: filter, id: "chat-messages") { [weak self] event in
             self?.handleNostrMessage(event)
         }
     }
     
     func handleNostrMessage(_ giftWrap: NostrEvent) {
         // Deduplicate messages by ID
-        if deduplicationService.hasProcessedNostrEvent(giftWrap.id) { return }
+        if deduplicationService.hasProcessedNostrEvent(giftWrap.id) {
+            SecureLogger.debug("📨 Nostr gift wrap dedupe skip: \(giftWrap.id.prefix(16))…", category: .session)
+            return
+        }
         deduplicationService.recordNostrEvent(giftWrap.id)
-        
+
+        SecureLogger.debug("📨 Nostr gift wrap received: \(giftWrap.id.prefix(16))… from=\(giftWrap.pubkey.prefix(16))…", category: .session)
+
         // Ensure we're on a background queue for decryption
         Task.detached(priority: .userInitiated) { [weak self] in
             await self?.processNostrMessage(giftWrap)
@@ -602,13 +640,17 @@ extension ChatViewModel {
     }
     
     func processNostrMessage(_ giftWrap: NostrEvent) async {
-        guard let currentIdentity = try? idBridge.getCurrentNostrIdentity() else { return }
-        
+        guard let currentIdentity = try? idBridge.getCurrentNostrIdentity() else {
+            SecureLogger.warning("📨 Cannot process gift wrap - no Nostr identity", category: .session)
+            return
+        }
+
         do {
             let (content, senderPubkey, rumorTimestamp) = try NostrProtocol.decryptPrivateMessage(
                 giftWrap: giftWrap,
                 recipientIdentity: currentIdentity
             )
+            SecureLogger.debug("📨 Decrypted gift wrap from=\(senderPubkey.prefix(16))… content prefix=\(content.prefix(20))…", category: .session)
             
             // Handle verification payloads first
             if content.hasPrefix("verify:") {
@@ -616,7 +658,27 @@ extension ChatViewModel {
                 // Verification should ideally happen over mesh for security binding
                 return
             }
-            
+
+            // Handle location announcements (simple format)
+            if content.hasPrefix("LOCATION:") {
+                let base64 = String(content.dropFirst("LOCATION:".count))
+                if let data = Data(base64Encoded: base64),
+                   let announce = LocationAnnounce.fromBinaryData(data) {
+                    // Find sender's PeerID from Nostr key
+                    let actualSenderNoiseKey = findNoiseKey(for: senderPubkey)
+                    let senderPeerID: PeerID
+                    if let noiseKey = actualSenderNoiseKey {
+                        senderPeerID = PeerID(publicKey: noiseKey)
+                    } else {
+                        senderPeerID = PeerID(nostr_: senderPubkey)
+                    }
+                    await MainActor.run {
+                        nostrTransport.handleLocationAnnounce(from: senderPeerID, announce: announce)
+                    }
+                }
+                return
+            }
+
             // Check if it's a BitChat packet embedded in the content (bitchat1:...)
             if content.hasPrefix("bitchat1:") {
                 guard let packetData = Self.base64URLDecode(String(content.dropFirst("bitchat1:".count))),
@@ -627,17 +689,26 @@ extension ChatViewModel {
                 
                 // Map sender by Nostr pubkey to Noise key when possible
                 let actualSenderNoiseKey = findNoiseKey(for: senderPubkey)
-                
+
                 // Stable target ID if we know Noise key; otherwise temporary Nostr-based peer
-                let targetPeerID = PeerID(str: actualSenderNoiseKey?.hexEncodedString()) ?? PeerID(nostr_: senderPubkey)
+                // IMPORTANT: Use PeerID(publicKey:) to get the SHORT 16-char ID that matches BLE peers
+                let targetPeerID: PeerID
+                if let noiseKey = actualSenderNoiseKey {
+                    targetPeerID = PeerID(publicKey: noiseKey)
+                    SecureLogger.debug("📨 Using short peerID from Noise key: \(targetPeerID.id)", category: .session)
+                } else {
+                    targetPeerID = PeerID(nostr_: senderPubkey)
+                    SecureLogger.debug("📨 Using Nostr-based peerID (no Noise key): \(targetPeerID.id)", category: .session)
+                }
                 
                 if packet.type == MessageType.noiseEncrypted.rawValue {
                     if let payload = NoisePayload.decode(packet.payload) {
+                        SecureLogger.debug("📨 BitChat payload type=\(payload.type) from=\(senderPubkey.prefix(16))…", category: .session)
                         let messageTimestamp = Date(timeIntervalSince1970: TimeInterval(rumorTimestamp))
                         // Store Nostr mapping
                         await MainActor.run {
                             nostrKeyMapping[targetPeerID] = senderPubkey
-                            
+
                             // Handle packet types
                             switch payload.type {
                             case .privateMessage:
@@ -648,6 +719,17 @@ extension ChatViewModel {
                                 handleReadReceipt(payload, senderPubkey: senderPubkey, convKey: targetPeerID)
                             case .verifyChallenge, .verifyResponse:
                                 break
+                            case .trackRequest:
+                                // Respond with our GPS location
+                                self.handleTrackRequest(payload, senderPubkey: senderPubkey, convKey: targetPeerID, id: currentIdentity)
+                            case .trackResponse:
+                                // Forward to NostrTransport to complete pending request
+                                self.handleTrackResponseFromNostr(payload)
+                            case .locationAnnounce:
+                                // Handle location announcement via embedded packet
+                                if let announce = LocationAnnounce.fromBinaryData(payload.data) {
+                                    self.nostrTransport.handleLocationAnnounce(from: targetPeerID, announce: announce)
+                                }
                             }
                         }
                     }
@@ -664,7 +746,7 @@ extension ChatViewModel {
         // Check favorites for this Nostr key
         let favorites = FavoritesPersistenceService.shared.favorites.values
         var npubToMatch = nostrPubkey
-        
+
         // Convert hex to npub if needed for comparison
         if !nostrPubkey.hasPrefix("npub") {
             if let pubkeyData = Data(hexString: nostrPubkey),
@@ -674,25 +756,31 @@ extension ChatViewModel {
                 SecureLogger.warning("⚠️ Invalid hex public key format or encoding failed: \(nostrPubkey.prefix(16))...", category: .session)
             }
         }
-        
+
+        SecureLogger.info("🔍 findNoiseKey: looking for npub=\(npubToMatch.prefix(24))... (hex=\(nostrPubkey.prefix(16))...)", category: .session)
+
         for relationship in favorites {
             // Search through favorites for matching Nostr pubkey
             if let storedNostrKey = relationship.peerNostrPublicKey {
+                SecureLogger.debug("🔍 Comparing with \(relationship.peerNickname): stored=\(storedNostrKey.prefix(24))...", category: .session)
+
                 // Compare against stored key (could be hex or npub)
                 if storedNostrKey == npubToMatch {
-                    // SecureLogger.debug("✅ Found Noise key for Nostr sender (npub match)", category: .session)
+                    SecureLogger.info("✅ Found Noise key for Nostr sender (npub match) - \(relationship.peerNickname)", category: .session)
                     return relationship.peerNoisePublicKey
                 }
-                
+
                 // Also try comparing raw hex if stored key is hex
                 if !storedNostrKey.hasPrefix("npub") && storedNostrKey == nostrPubkey {
-                    SecureLogger.debug("✅ Found Noise key for Nostr sender (hex match)", category: .session)
+                    SecureLogger.info("✅ Found Noise key for Nostr sender (hex match) - \(relationship.peerNickname)", category: .session)
                     return relationship.peerNoisePublicKey
                 }
+            } else {
+                SecureLogger.debug("🔍 \(relationship.peerNickname): NO npub stored", category: .session)
             }
         }
-        
-        SecureLogger.debug("⚠️ No matching Noise key found for Nostr pubkey: \(nostrPubkey.prefix(16))... (tried npub: \(npubToMatch.prefix(16))...)", category: .session)
+
+        SecureLogger.warning("⚠️ No matching Noise key found for Nostr pubkey: \(nostrPubkey.prefix(16))... (tried npub: \(npubToMatch.prefix(24))...)", category: .session)
         return nil
     }
 
@@ -832,5 +920,77 @@ extension ChatViewModel {
             return convKey.bare
         }
         return displayNameForNostrPubkey(full)
+    }
+
+    // MARK: - Relay Tracking
+
+    /// Handle incoming TrackRequest from a peer via Nostr relay - respond with our GPS
+    @MainActor
+    func handleTrackRequest(_ payload: NoisePayload, senderPubkey: String, convKey: PeerID, id: NostrIdentity) {
+        // Parse the TrackRequest
+        guard let request = TrackRequest.fromBinaryData(payload.data) else {
+            SecureLogger.warning("NostrTransport: failed to parse TrackRequest", category: .session)
+            return
+        }
+
+        SecureLogger.info("📍 NostrTransport: RECEIVED TrackRequest id=\(request.id.prefix(8))… from \(senderPubkey.prefix(8))… - WILL RESPOND", category: .session)
+
+        // Build response with our GPS data
+        let locationManager = LocationStateManager.shared
+        let response: TrackResponse
+
+        SecureLogger.info("📍 handleTrackRequest: currentLocation=\(locationManager.currentLocation != nil)", category: .session)
+
+        if let location = locationManager.currentLocation {
+            response = TrackResponse(
+                requestID: request.id,
+                gpsEnabled: true,
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude,
+                altitude: location.altitude,
+                horizontalAccuracy: location.horizontalAccuracy,
+                verticalAccuracy: location.verticalAccuracy,
+                uwbSupported: false, // UWB not available over relay
+                uwbToken: nil
+            )
+        } else {
+            response = TrackResponse.disabled(requestID: request.id)
+        }
+
+        // Send response back via Nostr
+        guard let embedded = NostrEmbeddedBitChat.encodeTrackResponseForNostr(
+            response: response,
+            recipientPeerID: convKey,
+            senderPeerID: meshService.myPeerID
+        ) else {
+            SecureLogger.error("NostrTransport: failed to encode TrackResponse", category: .session)
+            return
+        }
+
+        guard let event = try? NostrProtocol.createPrivateMessage(
+            content: embedded,
+            recipientPubkey: senderPubkey,
+            senderIdentity: id
+        ) else {
+            SecureLogger.error("NostrTransport: failed to build TrackResponse Nostr event", category: .session)
+            return
+        }
+
+        NostrRelayManager.shared.sendEvent(event)
+        SecureLogger.debug("NostrTransport: sent TrackResponse for id=\(request.id.prefix(8))…", category: .session)
+    }
+
+    /// Handle incoming TrackResponse from a peer via Nostr relay
+    func handleTrackResponseFromNostr(_ payload: NoisePayload) {
+        guard let response = TrackResponse.fromBinaryData(payload.data) else {
+            SecureLogger.warning("📍 handleTrackResponseFromNostr: failed to parse TrackResponse from payload size=\(payload.data.count)", category: .session)
+            return
+        }
+
+        let hasLocation = response.gpsEnabled && response.latitude != nil
+        SecureLogger.info("📍 handleTrackResponseFromNostr: requestID=\(response.requestID.prefix(8))… hasLocation=\(hasLocation)", category: .session)
+
+        // Forward to NostrTransport to complete pending request
+        nostrTransport.handleTrackResponse(response)
     }
 }

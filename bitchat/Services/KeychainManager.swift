@@ -556,26 +556,53 @@ final class KeychainManager: KeychainManagerProtocol {
         ]
         if let accessible = accessible {
             query[kSecAttrAccessible as String] = accessible
+        } else {
+            // Default to accessible when unlocked for better macOS compatibility
+            query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
         }
+        #if os(macOS)
+        // macOS requires synchronizable to be explicitly set
+        query[kSecAttrSynchronizable as String] = false
+        #endif
 
-        SecItemDelete(query as CFDictionary)
-        SecItemAdd(query as CFDictionary, nil)
+        // Delete existing item first
+        var deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: customService,
+            kSecAttrAccount as String: key
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status != errSecSuccess {
+            SecureLogger.error(NSError(domain: "Keychain", code: Int(status)),
+                               context: "Failed to save keychain item for key: \(key), service: \(customService)", category: .keychain)
+        } else {
+            SecureLogger.debug("Keychain save succeeded for key: \(key), service: \(customService)", category: .keychain)
+        }
     }
 
     /// Load data from a custom service
     func load(key: String, service customService: String) -> Data? {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: customService,
             kSecAttrAccount as String: key,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
-        guard status == errSecSuccess else { return nil }
-        return result as? Data
+        if status == errSecSuccess {
+            SecureLogger.debug("Keychain load succeeded for key: \(key), service: \(customService)", category: .keychain)
+            return result as? Data
+        } else if status != errSecItemNotFound {
+            SecureLogger.error(NSError(domain: "Keychain", code: Int(status)),
+                               context: "Failed to load keychain item for key: \(key), service: \(customService)", category: .keychain)
+        }
+        return nil
     }
 
     /// Delete data from a custom service

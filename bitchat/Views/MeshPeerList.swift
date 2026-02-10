@@ -63,8 +63,8 @@ struct MeshPeerList: View {
                             Image(systemName: "point.3.filled.connected.trianglepath.dotted")
                                 .font(.bitchatSystem(size: 10))
                                 .foregroundColor(baseColor)
-                        } else if peer.isMutualFavorite {
-                            // Mutual favorite reachable via Nostr: globe icon (purple)
+                        } else if peer.isNostrReachable {
+                            // Mutual favorite with known Nostr key: globe icon (purple)
                             Image(systemName: "globe")
                                 .font(.bitchatSystem(size: 10))
                                 .foregroundColor(.purple)

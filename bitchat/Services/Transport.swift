@@ -62,6 +62,12 @@ protocol Transport: AnyObject {
     // Pending file management (BCH-01-002: files held in memory until user accepts)
     func acceptPendingFile(id: String) -> URL?
     func declinePendingFile(id: String)
+
+    // Tracking (request GPS, measure ping and RSSI locally)
+    func sendTrackRequest(to peerID: PeerID, completion: @escaping (Result<(response: TrackResponse, pingMs: Int, rssi: Int?), Error>) -> Void)
+
+    // Location announcements (periodic broadcast to mutual favorites)
+    func sendLocationAnnounce(_ announce: LocationAnnounce, to peerID: PeerID)
 }
 
 extension Transport {
@@ -77,6 +83,20 @@ extension Transport {
 
     func acceptPendingFile(id: String) -> URL? { nil }
     func declinePendingFile(id: String) {}
+
+    func sendTrackRequest(to peerID: PeerID, completion: @escaping (Result<(response: TrackResponse, pingMs: Int, rssi: Int?), Error>) -> Void) {
+        completion(.failure(TrackingError.notSupported))
+    }
+
+    func sendLocationAnnounce(_ announce: LocationAnnounce, to peerID: PeerID) {
+        // Default no-op for transports that don't support announcements
+    }
+}
+
+enum TrackingError: Error {
+    case notSupported
+    case timeout
+    case peerNotConnected
 }
 
 protocol TransportPeerEventsDelegate: AnyObject {

@@ -15,7 +15,7 @@ import UIKit
 final class BLEService: NSObject {
     
     // MARK: - Constants
-    
+
     #if DEBUG
     static let serviceUUID = CBUUID(string: "F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5A") // testnet
     #else
@@ -76,7 +76,18 @@ final class BLEService: NSObject {
     private var currentPeerIDs: [PeerID] {
         Array(peers.keys)
     }
-    
+
+    // RSSI per peer (updated on didDiscover for connected peers)
+    private var peerRSSI: [PeerID: Int] = [:]
+
+    // Tracking: pending track requests (id -> (peerID, sentAt, completion))
+    private var pendingTrackRequests: [String: (peerID: PeerID, sentAt: Date, completion: (Result<(response: TrackResponse, pingMs: Int, rssi: Int?), Error>) -> Void)] = [:]
+
+    // Tracking: pending handshake initiations to avoid redundant attempts
+    // Maps peerID -> last handshake initiation time
+    private var pendingHandshakeInitiations: [PeerID: Date] = [:]
+    private let handshakeInitiationCooldown: TimeInterval = 5.0  // Don't re-initiate within 5 seconds
+
     // 4. Efficient Message Deduplication
     private let messageDeduplicator = MessageDeduplicator()
     private var selfBroadcastMessageIDs: [String: (id: String, timestamp: Date)] = [:]
@@ -291,7 +302,7 @@ final class BLEService: NSObject {
             object: nil
         )
         #endif
-        
+
         // Tag BLE queue for re-entrancy detection
         bleQueue.setSpecific(key: bleQueueKey, value: ())
 
@@ -657,7 +668,321 @@ final class BLEService: NSObject {
             return PeerDisplayNameResolver.resolve(tuples, selfNickname: myNickname)
         }
     }
-    
+
+    private func getRSSI(for peerID: PeerID) -> Int? {
+        return collectionsQueue.sync { peerRSSI[peerID] }
+    }
+
+    // MARK: - Tracking (request/response for GPS, ping measured from round-trip, RSSI measured locally)
+
+    /// Request fresh RSSI reading for a connected peer
+    private func requestRSSIReading(for peerID: PeerID) {
+        bleQueue.async { [weak self] in
+            guard let self = self else { return }
+            // Find peripheral UUID for this peer
+            guard let peripheralUUIDString = self.peerToPeripheralUUID[peerID],
+                  let state = self.peripherals[peripheralUUIDString] else {
+                return
+            }
+            let peripheral = state.peripheral
+            guard peripheral.state == .connected else { return }
+            // Request RSSI reading - result will come via didReadRSSI delegate
+            peripheral.readRSSI()
+        }
+    }
+
+    func sendTrackRequest(to peerID: PeerID, completion: @escaping (Result<(response: TrackResponse, pingMs: Int, rssi: Int?), Error>) -> Void) {
+        guard isPeerConnected(peerID) else {
+            completion(.failure(TrackingError.peerNotConnected))
+            return
+        }
+
+        // Request fresh RSSI reading
+        requestRSSIReading(for: peerID)
+
+        // Include UWB token if supported and not yet exchanged with this peer
+        let uwbSupported = UWBTrackingManager.shared.isUWBSupported
+        let shouldSendUWB = UWBTrackingManager.shared.shouldSendToken(to: peerID)
+        let uwbToken: Data? = shouldSendUWB
+            ? UWBTrackingManager.shared.getMyTokenData(for: peerID)
+            : nil
+
+        SecureLogger.debug("📍 TrackRequest prep - UWB supported: \(uwbSupported), shouldSend: \(shouldSendUWB), tokenSize: \(uwbToken?.count ?? 0)", category: .session)
+
+        let request = TrackRequest(uwbToken: uwbToken)
+        var payload = Data([NoisePayloadType.trackRequest.rawValue])
+        payload.append(request.toBinaryData())
+
+        SecureLogger.info("📍 Sending track request to \(peerID.id.prefix(8)) - requestID: \(request.id.prefix(8)), uwbToken: \(uwbToken?.count ?? 0) bytes", category: .session)
+
+        // Store pending completion with peerID for RSSI lookup
+        collectionsQueue.async(flags: .barrier) { [weak self] in
+            self?.pendingTrackRequests[request.id] = (peerID: peerID, sentAt: Date(), completion: completion)
+            SecureLogger.debug("📍 Stored pending request \(request.id.prefix(8)), total pending: \(self?.pendingTrackRequests.count ?? 0)", category: .session)
+        }
+
+        // Set timeout (10 seconds to allow for mesh relay and location refresh)
+        messageQueue.asyncAfter(deadline: .now() + 10.0) { [weak self] in
+            self?.collectionsQueue.async(flags: .barrier) {
+                if let pending = self?.pendingTrackRequests.removeValue(forKey: request.id) {
+                    SecureLogger.warning("⏱️ Track request \(request.id.prefix(8)) timed out after 10s", category: .session)
+                    DispatchQueue.main.async {
+                        pending.completion(.failure(TrackingError.timeout))
+                    }
+                }
+            }
+        }
+
+        // Send via Noise
+        let hasSession = noiseService.hasEstablishedSession(with: peerID)
+        SecureLogger.debug("📍 Noise session established with \(peerID.id.prefix(8)): \(hasSession)", category: .session)
+        if hasSession {
+            do {
+                let encrypted = try noiseService.encrypt(payload, for: peerID)
+                let packet = BitchatPacket(
+                    type: MessageType.noiseEncrypted.rawValue,
+                    senderID: myPeerIDData,
+                    recipientID: Data(hexString: peerID.id),
+                    timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+                    payload: encrypted,
+                    signature: nil,
+                    ttl: messageTTL
+                )
+                broadcastPacket(packet)
+            } catch {
+                collectionsQueue.async(flags: .barrier) { [weak self] in
+                    self?.pendingTrackRequests.removeValue(forKey: request.id)
+                }
+                completion(.failure(error))
+            }
+        } else {
+            // Queue for after handshake
+            collectionsQueue.async(flags: .barrier) { [weak self] in
+                self?.pendingNoisePayloadsAfterHandshake[peerID, default: []].append(payload)
+            }
+            initiateNoiseHandshake(with: peerID)
+        }
+    }
+
+    private func handleTrackRequest(from peerID: PeerID, payload: Data) {
+        guard let request = TrackRequest.fromBinaryData(payload) else {
+            SecureLogger.error("❌ Failed to parse TrackRequest from payload", category: .session)
+            return
+        }
+
+        SecureLogger.info("📍 Received track request from \(peerID.id.prefix(8)) - requestID: \(request.id.prefix(8))", category: .session)
+
+        // Notify that someone is pinging/tracking us
+        let peerNickname = collectionsQueue.sync { peers[peerID]?.nickname } ?? peerID.id.prefix(8).description
+        DispatchQueue.main.async {
+            // Post notification for UI to show ping received
+            NotificationCenter.default.post(
+                name: .trackRequestReceived,
+                object: nil,
+                userInfo: ["peerID": peerID, "nickname": peerNickname]
+            )
+            // Haptic feedback
+            HapticManager.shared.pingResponseReceived()
+        }
+
+        // Process peer's UWB token if present
+        if let peerUWBToken = request.uwbToken, !peerUWBToken.isEmpty {
+            UWBTrackingManager.shared.handleReceivedToken(from: peerID, tokenData: peerUWBToken)
+        }
+
+        // Determine if we should include our UWB token in the response
+        // (include it if peer sent theirs or if we haven't exchanged yet)
+        let shouldSendUWBToken = request.uwbToken != nil || UWBTrackingManager.shared.shouldSendToken(to: peerID)
+
+        // Always try to get fresh location when someone requests tracking
+        let locationEnabled = LocationStateManager.shared.isLocationEnabled
+        let hasLocation = LocationStateManager.shared.currentLocation != nil
+        SecureLogger.debug("📍 TrackRequest received - locationEnabled: \(locationEnabled), hasLocation: \(hasLocation)", category: .session)
+
+        if locationEnabled {
+            // Request fresh location with callback - this triggers one-shot GPS request
+            // and waits up to 3 seconds for a new location fix
+            DispatchQueue.main.async { [weak self] in
+                LocationStateManager.shared.requestFreshLocation { location in
+                    let finalHasLocation = location != nil
+                    let lat = location?.coordinate.latitude ?? 0
+                    let lon = location?.coordinate.longitude ?? 0
+                    SecureLogger.debug("📍 Fresh location received - hasLocation: \(finalHasLocation), lat: \(lat), lon: \(lon)", category: .session)
+
+                    // Send response (will run on messageQueue via sendTrackResponse)
+                    self?.sendTrackResponse(requestID: request.id, to: peerID, includeUWBToken: shouldSendUWBToken)
+
+                    // Stop tracking mode after response (to save battery)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        LocationStateManager.shared.endTrackingMode()
+                    }
+                }
+            }
+        } else {
+            // Location disabled, respond immediately with no GPS
+            SecureLogger.warning("📍 Location not enabled - responding without GPS. Check Settings > Privacy > Location Services", category: .session)
+            sendTrackResponse(requestID: request.id, to: peerID, includeUWBToken: shouldSendUWBToken)
+        }
+    }
+
+    private func sendTrackResponse(requestID: String, to peerID: PeerID, includeUWBToken: Bool = false) {
+        // Get UWB token if we should include it
+        let uwbToken: Data? = includeUWBToken ? UWBTrackingManager.shared.getMyTokenData(for: peerID) : nil
+        let uwbSupported = UWBTrackingManager.shared.isUWBSupported
+
+        // Debug logging for location state
+        let locationEnabled = LocationStateManager.shared.isLocationEnabled
+        let hasLocation = LocationStateManager.shared.currentLocation != nil
+        SecureLogger.debug("📍 TrackResponse prep - locationEnabled: \(locationEnabled), hasLocation: \(hasLocation), uwbSupported: \(uwbSupported), includeUWBToken: \(includeUWBToken), uwbTokenSize: \(uwbToken?.count ?? 0)", category: .session)
+
+        let response: TrackResponse
+        if LocationStateManager.shared.isLocationEnabled,
+           let location = LocationStateManager.shared.currentLocation {
+            response = TrackResponse(
+                requestID: requestID,
+                gpsEnabled: true,
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude,
+                altitude: location.altitude,
+                horizontalAccuracy: location.horizontalAccuracy,
+                verticalAccuracy: location.verticalAccuracy,
+                uwbSupported: uwbSupported,
+                uwbToken: uwbToken
+            )
+        } else {
+            SecureLogger.warning("📍 Sending TrackResponse with NO GPS - locationEnabled: \(locationEnabled), hasLocation: \(hasLocation)", category: .session)
+            response = TrackResponse(
+                requestID: requestID,
+                gpsEnabled: false,
+                latitude: nil,
+                longitude: nil,
+                altitude: nil,
+                horizontalAccuracy: nil,
+                verticalAccuracy: nil,
+                uwbSupported: uwbSupported,
+                uwbToken: uwbToken
+            )
+        }
+
+        let binaryResponse = response.toBinaryData()
+        var responsePayload = Data([NoisePayloadType.trackResponse.rawValue])
+        responsePayload.append(binaryResponse)
+
+        SecureLogger.info("📍 Sending track response to \(peerID.id.prefix(8)) - requestID: \(requestID.prefix(8)), gpsEnabled: \(response.gpsEnabled), lat: \(String(format: "%.6f", response.latitude ?? 0)), lon: \(String(format: "%.6f", response.longitude ?? 0)), accuracy: \(response.horizontalAccuracy ?? -1), binarySize: \(binaryResponse.count)", category: .session)
+
+        guard noiseService.hasEstablishedSession(with: peerID) else {
+            SecureLogger.warning("⚠️ Cannot send track response - no Noise session with \(peerID.id.prefix(8))", category: .session)
+            return
+        }
+
+        do {
+            let encrypted = try noiseService.encrypt(responsePayload, for: peerID)
+            let packet = BitchatPacket(
+                type: MessageType.noiseEncrypted.rawValue,
+                senderID: myPeerIDData,
+                recipientID: Data(hexString: peerID.id),
+                timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+                payload: encrypted,
+                signature: nil,
+                ttl: messageTTL
+            )
+            broadcastPacket(packet)
+            SecureLogger.debug("📍 Track response packet broadcasted successfully", category: .session)
+        } catch {
+            SecureLogger.error("Failed to send trackResponse: \(error)", category: .session)
+        }
+    }
+
+    private func handleTrackResponse(from peerID: PeerID, payload: Data) {
+        SecureLogger.debug("📍 Received track response payload from \(peerID.id.prefix(8)), size: \(payload.count) bytes", category: .session)
+
+        guard let response = TrackResponse.fromBinaryData(payload) else {
+            SecureLogger.error("❌ Failed to parse TrackResponse from payload", category: .session)
+            return
+        }
+
+        SecureLogger.info("📍 Parsed TrackResponse - requestID: \(response.requestID.prefix(8)), gpsEnabled: \(response.gpsEnabled), lat: \(String(format: "%.6f", response.latitude ?? 0)), lon: \(String(format: "%.6f", response.longitude ?? 0)), accuracy: \(response.horizontalAccuracy ?? -1), uwbSupported: \(response.uwbSupported), uwbToken: \(response.uwbToken?.count ?? 0) bytes", category: .session)
+
+        // Process peer's UWB token if present
+        if let peerUWBToken = response.uwbToken, !peerUWBToken.isEmpty {
+            UWBTrackingManager.shared.handleReceivedToken(from: peerID, tokenData: peerUWBToken)
+        }
+
+        collectionsQueue.async(flags: .barrier) { [weak self] in
+            let pendingIDs = self?.pendingTrackRequests.keys.map { $0.prefix(8).description } ?? []
+            SecureLogger.debug("📍 Looking for requestID \(response.requestID.prefix(8)) in pending: \(pendingIDs)", category: .session)
+
+            guard let pending = self?.pendingTrackRequests.removeValue(forKey: response.requestID) else {
+                SecureLogger.warning("⚠️ No pending request found for requestID: \(response.requestID.prefix(8))", category: .session)
+                return
+            }
+            let pingMs = Int(Date().timeIntervalSince(pending.sentAt) * 1000)
+            // Measure RSSI locally (signal strength we see from peer)
+            let rssi = self?.peerRSSI[pending.peerID]
+            SecureLogger.info("✅ Track response matched! RTT: \(pingMs)ms, RSSI: \(rssi ?? -999)", category: .session)
+            DispatchQueue.main.async {
+                pending.completion(.success((response: response, pingMs: pingMs, rssi: rssi)))
+            }
+        }
+    }
+
+    // MARK: - Location Announcements
+
+    func sendLocationAnnounce(_ announce: LocationAnnounce, to peerID: PeerID) {
+        var payload = Data([NoisePayloadType.locationAnnounce.rawValue])
+        payload.append(announce.toBinaryData())
+
+        guard noiseService.hasEstablishedSession(with: peerID) else {
+            SecureLogger.debug("📍 Cannot send location announce - no session with \(peerID.id.prefix(8))", category: .session)
+            return
+        }
+
+        do {
+            let encrypted = try noiseService.encrypt(payload, for: peerID)
+            let packet = BitchatPacket(
+                type: MessageType.noiseEncrypted.rawValue,
+                senderID: myPeerIDData,
+                recipientID: Data(hexString: peerID.id),
+                timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+                payload: encrypted,
+                signature: nil,
+                ttl: messageTTL
+            )
+            broadcastPacket(packet)
+            SecureLogger.debug("📍 Sent location announce to \(peerID.id.prefix(8))", category: .session)
+        } catch {
+            SecureLogger.error("Failed to send location announce: \(error)", category: .session)
+        }
+    }
+
+    private func handleLocationAnnounce(from peerID: PeerID, payload: Data) {
+        guard let announce = LocationAnnounce.fromBinaryData(payload) else {
+            SecureLogger.error("Failed to parse LocationAnnounce", category: .session)
+            return
+        }
+
+        // Forward to TrackingService (which will verify mutual favorite status)
+        Task { @MainActor in
+            // Verify sender is a mutual favorite (privacy check)
+            guard self.isMutualFavorite(peerID) else {
+                SecureLogger.warning("Ignoring location announce from non-favorite \(peerID.id.prefix(8))", category: .session)
+                return
+            }
+            TrackingService.shared.handleLocationAnnounce(from: peerID, announce: announce, transport: .ble)
+        }
+    }
+
+    @MainActor
+    private func isMutualFavorite(_ peerID: PeerID) -> Bool {
+        let shortID = peerID.toShort()
+        for (noiseKey, rel) in FavoritesPersistenceService.shared.favorites {
+            if rel.isMutual && PeerID(publicKey: noiseKey).toShort().id == shortID.id {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: Protocol utilities
     
     func getFingerprint(for peerID: PeerID) -> String? {
@@ -1277,16 +1602,16 @@ final class BLEService: NSObject {
     
     func sendFavoriteNotification(to peerID: PeerID, isFavorite: Bool) {
         SecureLogger.debug("🔔 sendFavoriteNotification called - peerID: \(peerID), isFavorite: \(isFavorite)", category: .session)
-        
+
         // Include Nostr public key in the notification
         var content = isFavorite ? "[FAVORITED]" : "[UNFAVORITED]"
-        
+
         // Add our Nostr public key if available
         if let myNostrIdentity = try? idBridge.getCurrentNostrIdentity() {
             content += ":" + myNostrIdentity.npub
             SecureLogger.debug("📝 Sending favorite notification with Nostr npub: \(myNostrIdentity.npub)", category: .session)
         }
-        
+
         SecureLogger.debug("📤 Sending favorite notification to \(peerID): \(content)", category: .session)
         sendPrivateMessage(content, to: peerID, messageID: UUID().uuidString)
     }
@@ -1795,6 +2120,12 @@ extension BLEService: CBCentralManagerDelegate {
         // Check if we already have this peripheral
         if let state = peripherals[peripheralID] {
             if state.isConnected || state.isConnecting {
+                // Update RSSI for connected peer
+                if state.isConnected, let peerID = state.peerID {
+                    collectionsQueue.async(flags: .barrier) { [weak self] in
+                        self?.peerRSSI[peerID] = rssiValue
+                    }
+                }
                 return // Already connected or connecting
             }
             
@@ -2154,11 +2485,14 @@ extension BLEService: CBPeripheralDelegate {
     }
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        // Only process notifications from our Bitchat characteristic (ignore system services like Nearby Interaction)
+        guard characteristic.uuid == BLEService.characteristicUUID else { return }
+
         if let error = error {
             SecureLogger.error("❌ Error receiving notification: \(error.localizedDescription)", category: .session)
             return
         }
-        
+
         guard let data = characteristic.value, !data.isEmpty else {
             SecureLogger.warning("⚠️ No data in notification", category: .session)
             return
@@ -2275,11 +2609,25 @@ extension BLEService: CBPeripheralDelegate {
             SecureLogger.error("❌ Error updating notification state: \(error.localizedDescription)", category: .session)
         } else {
             SecureLogger.debug("🔔 Notification state updated for \(peripheral.name ?? peripheral.identifier.uuidString): \(characteristic.isNotifying ? "ON" : "OFF")", category: .session)
-            
+
             // If notifications are now on, send an announce to ensure this peer knows about us
             if characteristic.isNotifying {
                 // Sending announce after subscription
                 self.sendAnnounce(forceSend: true)
+            }
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        guard error == nil else { return }
+        let rssiValue = RSSI.intValue
+
+        // Find the peerID for this peripheral
+        let peripheralIDString = peripheral.identifier.uuidString
+        collectionsQueue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            if let state = self.peripherals[peripheralIDString], let peerID = state.peerID {
+                self.peerRSSI[peerID] = rssiValue
             }
         }
     }
@@ -2856,6 +3204,10 @@ extension BLEService {
     private func configureNoiseServiceCallbacks(for service: NoiseEncryptionService) {
         service.onPeerAuthenticated = { [weak self] peerID, fingerprint in
             SecureLogger.debug("🔐 Noise session authenticated with \(peerID), fingerprint: \(fingerprint.prefix(16))...")
+
+            // Clear handshake cooldown now that session is established
+            self?.pendingHandshakeInitiations.removeValue(forKey: peerID)
+
             self?.messageQueue.async { [weak self] in
                 self?.sendPendingMessagesAfterHandshake(for: peerID)
                 self?.sendPendingNoisePayloadsAfterHandshake(for: peerID)
@@ -3209,11 +3561,38 @@ extension BLEService {
     
     private func initiateNoiseHandshake(with peerID: PeerID) {
         // Use NoiseEncryptionService for handshake
-        guard !noiseService.hasSession(with: peerID) else { return }
-        
+        let hasExistingSession = noiseService.hasSession(with: peerID)
+        let hasEstablished = noiseService.hasEstablishedSession(with: peerID)
+        SecureLogger.debug("🤝 initiateNoiseHandshake with \(peerID.id.prefix(8)) - hasSession: \(hasExistingSession), hasEstablished: \(hasEstablished)", category: .session)
+
+        // Only skip if session is fully established and working
+        guard !hasEstablished else {
+            SecureLogger.debug("🤝 Skipping handshake init - session already established with \(peerID.id.prefix(8))", category: .session)
+            return
+        }
+
+        // If a session exists but isn't established, it might be stuck - clean it up
+        if hasExistingSession && !hasEstablished {
+            SecureLogger.warning("🤝 Session exists but not established with \(peerID.id.prefix(8)) - cleaning up stale session", category: .session)
+            noiseService.clearSession(for: peerID)
+        }
+
+        // Check cooldown to prevent redundant handshake attempts
+        let now = Date()
+        if let lastAttempt = pendingHandshakeInitiations[peerID],
+           now.timeIntervalSince(lastAttempt) < handshakeInitiationCooldown {
+            SecureLogger.debug("🤝 Skipping handshake init - cooldown active for \(peerID.id.prefix(8)) (last attempt \(Int(now.timeIntervalSince(lastAttempt)))s ago)", category: .session)
+            return
+        }
+
         do {
             let handshakeData = try noiseService.initiateHandshake(with: peerID)
-            
+
+            // Record this initiation attempt
+            pendingHandshakeInitiations[peerID] = now
+
+            SecureLogger.info("🤝 Initiating Noise handshake with \(peerID.id.prefix(8)), payload size: \(handshakeData.count)", category: .session)
+
             // Send handshake init
             let packet = BitchatPacket(
                 type: MessageType.noiseHandshake.rawValue,
@@ -3225,8 +3604,9 @@ extension BLEService {
                 ttl: messageTTL
             )
             broadcastPacket(packet)
+            SecureLogger.debug("🤝 Handshake init packet sent to \(peerID.id.prefix(8))", category: .session)
         } catch {
-            SecureLogger.error("Failed to initiate handshake: \(error)")
+            SecureLogger.error("Failed to initiate handshake with \(peerID.id.prefix(8)): \(error)")
         }
     }
     
@@ -3922,6 +4302,14 @@ extension BLEService {
                     }
                 } else if existingPeer?.nickname != announcement.nickname {
                     SecureLogger.debug("🔄 Peer \(peerID) changed nickname: \(existingPeer?.nickname ?? "Unknown") -> \(announcement.nickname)", category: .session)
+
+                    // Sync nickname to favorites if this peer is a favorite
+                    Task { @MainActor in
+                        FavoritesPersistenceService.shared.updatePeerNickname(
+                            peerNoisePublicKey: announcement.noisePublicKey,
+                            newNickname: announcement.nickname
+                        )
+                    }
                 }
             }
         }
@@ -4108,11 +4496,16 @@ extension BLEService {
     }
     
     private func handleNoiseHandshake(_ packet: BitchatPacket, from peerID: PeerID) {
+        let recipientPeerID = PeerID(hexData: packet.recipientID)
+        SecureLogger.debug("🤝 handleNoiseHandshake from \(peerID.id.prefix(8)), recipient: \(recipientPeerID?.id.prefix(8) ?? "nil"), myPeerID: \(myPeerID.id.prefix(8))", category: .session)
+
         // Use NoiseEncryptionService for handshake processing
-        if PeerID(hexData: packet.recipientID) == myPeerID {
+        if recipientPeerID == myPeerID {
             // Handshake is for us
+            SecureLogger.info("🤝 Processing handshake from \(peerID.id.prefix(8)), payload size: \(packet.payload.count)", category: .session)
             do {
                 if let response = try noiseService.processHandshakeMessage(from: peerID, message: packet.payload) {
+                    SecureLogger.info("🤝 Sending handshake response to \(peerID.id.prefix(8)), response size: \(response.count)", category: .session)
                     // Send response
                     let responsePacket = BitchatPacket(
                         type: MessageType.noiseHandshake.rawValue,
@@ -4125,17 +4518,23 @@ extension BLEService {
                     )
                     // We're on messageQueue from delegate callback
                     broadcastPacket(responsePacket)
+                } else {
+                    // No response needed - handshake complete
+                    let isEstablished = noiseService.hasEstablishedSession(with: peerID)
+                    SecureLogger.info("🤝 Handshake processed (no response needed), session established: \(isEstablished)", category: .session)
                 }
-                
+
                 // Session establishment will trigger onPeerAuthenticated callback
                 // which will send any pending messages at the right time
             } catch {
-                SecureLogger.error("Failed to process handshake: \(error)")
+                SecureLogger.error("Failed to process handshake from \(peerID.id.prefix(8)): \(error)")
                 // Try initiating a new handshake
                 if !noiseService.hasSession(with: peerID) {
                     initiateNoiseHandshake(with: peerID)
                 }
             }
+        } else {
+            SecureLogger.debug("🤝 Handshake not for us (recipient: \(recipientPeerID?.id.prefix(8) ?? "nil"))", category: .session)
         }
     }
     
@@ -4189,6 +4588,12 @@ extension BLEService {
                 notifyUI { [weak self] in
                     self?.delegate?.didReceiveNoisePayload(from: peerID, type: .verifyResponse, payload: Data(payloadData), timestamp: ts)
                 }
+            case .trackRequest:
+                handleTrackRequest(from: peerID, payload: Data(payloadData))
+            case .trackResponse:
+                handleTrackResponse(from: peerID, payload: Data(payloadData))
+            case .locationAnnounce:
+                handleLocationAnnounce(from: peerID, payload: Data(payloadData))
             case .none:
                 SecureLogger.warning("⚠️ Unknown noise payload type: \(payloadType)")
             }
@@ -4563,5 +4968,28 @@ extension BLEService {
             threshold = max(threshold, TransportConfig.bleRSSIHighTimeoutThreshold)
         }
         dynamicRSSIThreshold = threshold
+    }
+}
+
+// MARK: - TransportMetadata Conformance
+
+extension BLEService: TransportMetadata {
+    var transportName: String { "BLE Mesh" }
+
+    var priority: Int { 100 }  // Highest priority - direct P2P over Bluetooth
+
+    var requiresInternet: Bool { false }
+
+    var isDirectConnection: Bool { true }
+
+    var connectionStatus: TransportConnectionStatus {
+        let connectedCount = peripherals.values.filter { $0.isConnected }.count
+        if connectedCount > 0 {
+            return .connected(peerCount: connectedCount)
+        } else if peripherals.values.contains(where: { $0.isConnecting }) {
+            return .connecting
+        } else {
+            return .disconnected
+        }
     }
 }

@@ -27,6 +27,39 @@ private struct MessageDisplayItem: Identifiable {
     let message: BitchatMessage
 }
 
+// MARK: - Tracking Button Content
+
+private struct TrackingButtonContent: View {
+    @ObservedObject private var trackingService = TrackingService.shared
+    @ObservedObject private var favoritesService = FavoritesPersistenceService.shared
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var textColor: Color {
+        colorScheme == .dark ? Color.green : Color(red: 0, green: 0.5, blue: 0)
+    }
+
+    private var activeCount: Int {
+        trackingService.peerLocations.values.filter { $0.hasLocation }.count
+    }
+
+    private var totalCount: Int {
+        favoritesService.mutualFavorites.count
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "location.north.circle.fill")
+                .font(.system(size: 14))
+            if totalCount > 0 {
+                Text("\(activeCount)/\(totalCount)")
+                    .font(.bitchatSystem(size: 10, design: .monospaced))
+            }
+        }
+        .foregroundColor(activeCount > 0 ? .green : (totalCount > 0 ? .green.opacity(0.6) : .gray.opacity(0.5)))
+        .frame(minWidth: 24, minHeight: 24)
+    }
+}
+
 // MARK: - Main Content View
 
 struct ContentView: View {
@@ -52,6 +85,7 @@ struct ContentView: View {
     @State private var scrollThrottleTimer: Timer?
     @State private var autocompleteDebounceTimer: Timer?
     @State private var showLocationChannelsSheet = false
+    @State private var showGroupTrackingSheet = false
     @State private var showVerifySheet = false
     @State private var expandedMessageIDs: Set<String> = []
     @State private var showLocationNotes = false
@@ -1198,7 +1232,6 @@ struct ContentView: View {
         }
     }
 
-    
     private var mainHeaderView: some View {
         HStack(spacing: 0) {
             Text(verbatim: "bitchat/")
@@ -1307,6 +1340,13 @@ struct ContentView: View {
                     )
                 }
 
+                // Group tracking button - always visible, shows star icon
+                Button(action: { showGroupTrackingSheet = true }) {
+                    TrackingButtonContent()
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "Track Favorites"))
+
                 // Location channels button '#'
                 Button(action: { showLocationChannelsSheet = true }) {
                     let badgeText: String = {
@@ -1377,6 +1417,10 @@ struct ContentView: View {
                 .environmentObject(viewModel)
                 .onAppear { viewModel.isLocationChannelsSheetPresented = true }
                 .onDisappear { viewModel.isLocationChannelsSheetPresented = false }
+        }
+        .sheet(isPresented: $showGroupTrackingSheet) {
+            BeaconSheetView()
+                .environmentObject(viewModel)
         }
         .sheet(isPresented: $showLocationNotes, onDismiss: {
             notesGeohash = nil

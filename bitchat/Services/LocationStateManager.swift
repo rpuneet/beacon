@@ -24,6 +24,18 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         case authorized
     }
 
+    // MARK: - Public Computed Properties (for tracking)
+
+    /// Whether location permission is granted
+    var isLocationEnabled: Bool {
+        permissionState == .authorized
+    }
+
+    /// Current CLLocation if available (for tracking feature)
+    var currentLocation: CLLocation? {
+        lastLocation
+    }
+
     // MARK: - Private Properties (CoreLocation)
 
     private let cl = CLLocationManager()
@@ -46,6 +58,11 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     @Published private(set) var selectedChannel: ChannelID = .mesh
     @Published var teleported: Bool = false
     @Published private(set) var locationNames: [GeohashChannelLevel: String] = [:]
+
+    // MARK: - Published State (Tracking Mode)
+
+    /// Current compass heading in degrees (0-360, where 0 = North)
+    @Published private(set) var currentHeading: CLLocationDirection?
 
     // MARK: - Published State (Bookmarks)
 
@@ -201,6 +218,71 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
     }
 
+    // MARK: - Public API (Tracking Mode - High Precision GPS + Heading)
+
+    /// Begin high-precision tracking mode with compass heading updates.
+    /// Uses maximum GPS accuracy for precise peer tracking.
+    func beginTrackingMode() {
+        guard permissionState == .authorized else { return }
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        cl.desiredAccuracy = kCLLocationAccuracyBestForNavigation  // Best possible GPS
+        cl.distanceFilter = kCLDistanceFilterNone  // Every location update
+        cl.startUpdatingLocation()
+        #if os(iOS)
+        cl.headingFilter = 1  // 1 degree change threshold for heading
+        cl.startUpdatingHeading()
+        #endif
+    }
+
+    /// End high-precision tracking mode and return to standby settings.
+    func endTrackingMode() {
+        #if os(iOS)
+        cl.stopUpdatingHeading()
+        #endif
+        cl.stopUpdatingLocation()
+        cl.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
+        Task { @MainActor in self.currentHeading = nil }
+    }
+
+    /// Request a fresh location update with callback.
+    /// Triggers a one-shot location request and notifies completion.
+    /// - Parameter completion: Called when location is available or timeout (3s) occurs
+    func requestFreshLocation(completion: @escaping (CLLocation?) -> Void) {
+        guard permissionState == .authorized else {
+            completion(nil)
+            return
+        }
+
+        // Start tracking mode for best accuracy
+        beginTrackingMode()
+
+        // Also trigger one-shot request
+        cl.requestLocation()
+
+        // Set up observer for location update
+        var hasCompleted = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: .init("LocationStateManager.didUpdateLocation"),
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            guard !hasCompleted else { return }
+            hasCompleted = true
+            completion(self?.lastLocation)
+        }
+
+        // Timeout after 3 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            NotificationCenter.default.removeObserver(observer)
+            guard !hasCompleted else { return }
+            hasCompleted = true
+            // Return whatever location we have (might be cached)
+            completion(self?.lastLocation)
+        }
+    }
+
     // MARK: - Public API (Channel Selection)
 
     func select(_ channel: ChannelID) {
@@ -303,11 +385,21 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         lastLocation = loc
         computeChannels(from: loc.coordinate)
         reverseGeocodeLocation(loc)
+        // Notify any pending location requests
+        NotificationCenter.default.post(name: .init("LocationStateManager.didUpdateLocation"), object: self)
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         SecureLogger.error("LocationStateManager: location error: \(error.localizedDescription)", category: .session)
     }
+
+    #if os(iOS)
+    func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        // Use trueHeading if GPS-corrected heading is available (>= 0), otherwise use magneticHeading
+        let heading = newHeading.trueHeading >= 0 ? newHeading.trueHeading : newHeading.magneticHeading
+        Task { @MainActor in self.currentHeading = heading }
+    }
+    #endif
 
     // MARK: - Private Helpers (Permission)
 

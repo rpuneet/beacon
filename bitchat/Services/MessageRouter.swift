@@ -2,9 +2,14 @@ import BitLogger
 import Foundation
 
 /// Routes messages using available transports (Mesh, Nostr, etc.)
+/// Uses TransportManager for priority-based transport selection with automatic failover.
 @MainActor
 final class MessageRouter {
-    private let transports: [Transport]
+    /// Legacy transports array for backward compatibility
+    private let legacyTransports: [Transport]
+
+    /// Whether to use TransportManager for routing (preferred)
+    private let useTransportManager: Bool
 
     // Outbox entry with timestamp for TTL-based eviction
     private struct QueuedMessage {
@@ -20,9 +25,21 @@ final class MessageRouter {
     private static let maxMessagesPerPeer = 100
     private static let messageTTLSeconds: TimeInterval = 24 * 60 * 60 // 24 hours
 
-    init(transports: [Transport]) {
-        self.transports = transports
+    /// Initialize with TransportManager (preferred)
+    init() {
+        self.legacyTransports = []
+        self.useTransportManager = true
+        setupObservers()
+    }
 
+    /// Initialize with explicit transport array (legacy, for backward compatibility)
+    init(transports: [Transport]) {
+        self.legacyTransports = transports
+        self.useTransportManager = false
+        setupObservers()
+    }
+
+    private func setupObservers() {
         // Observe favorites changes to learn Nostr mapping and flush queued messages
         NotificationCenter.default.addObserver(
             forName: .favoriteStatusChanged,
@@ -49,12 +66,34 @@ final class MessageRouter {
 
     // MARK: - Transport Selection
 
+    /// Get the best reachable transport for a peer using priority-based selection
     private func reachableTransport(for peerID: PeerID) -> Transport? {
-        transports.first { $0.isPeerReachable(peerID) }
+        if useTransportManager {
+            return TransportManager.shared.bestTransport(for: peerID)
+        }
+        return legacyTransports.first { $0.isPeerReachable(peerID) }
     }
 
+    /// Get a transport that has a direct connection to the peer
     private func connectedTransport(for peerID: PeerID) -> Transport? {
-        transports.first { $0.isPeerConnected(peerID) }
+        if useTransportManager {
+            // Find first connected transport (sorted by priority)
+            for transport in TransportManager.shared.transports {
+                if transport.isPeerConnected(peerID) {
+                    return transport
+                }
+            }
+            return nil
+        }
+        return legacyTransports.first { $0.isPeerConnected(peerID) }
+    }
+
+    /// Check if a peer is reachable via any transport
+    func isPeerReachable(_ peerID: PeerID) -> Bool {
+        if useTransportManager {
+            return TransportManager.shared.isPeerReachable(peerID)
+        }
+        return legacyTransports.contains { $0.isPeerReachable(peerID) }
     }
 
     // MARK: - Message Sending
@@ -84,7 +123,7 @@ final class MessageRouter {
         if let transport = reachableTransport(for: peerID) {
             SecureLogger.debug("Routing READ ack via \(type(of: transport)) to \(peerID.id.prefix(8))… id=\(receipt.originalMessageID.prefix(8))…", category: .session)
             transport.sendReadReceipt(receipt, to: peerID)
-        } else if !transports.isEmpty {
+        } else if !legacyTransports.isEmpty || useTransportManager {
             SecureLogger.debug("No reachable transport for READ ack to \(peerID.id.prefix(8))…", category: .session)
         }
     }
