@@ -203,27 +203,26 @@ final class BeaconService: ObservableObject {
 
     @discardableResult
     func handlePrivateMessage(from peerID: PeerID, senderNoiseKey: Data?, content: String, transport: PeerLocation.TransportType) -> Bool {
-        if content.hasPrefix("[PING]:") {
-            handlePing(from: peerID, senderNoiseKey: senderNoiseKey, content: content, transport: transport)
-            return true
-        } else if content.hasPrefix("[PONG]:") {
-            handlePong(from: peerID, content: content, transport: transport)
-            return true
+        guard let message = BeaconWire.parse(content) else {
+            // Consume malformed beacon-prefixed messages so they never render as chat
+            if content.hasPrefix(BeaconWire.pingPrefix) || content.hasPrefix(BeaconWire.pongPrefix) {
+                SecureLogger.warning("[Beacon] Malformed beacon message from \(peerID.id.prefix(8)) dropped", category: .session)
+                return true
+            }
+            return false
         }
-        return false
+        switch message.kind {
+        case .ping:
+            handlePing(from: peerID, senderNoiseKey: senderNoiseKey, message: message, transport: transport)
+        case .pong:
+            handlePong(from: peerID, message: message, transport: transport)
+        }
+        return true
     }
 
     // MARK: - Handle PING
 
-    private func handlePing(from peerID: PeerID, senderNoiseKey: Data?, content: String, transport: PeerLocation.TransportType) {
-        let parts = content.dropFirst(7).split(separator: ":", maxSplits: 4, omittingEmptySubsequences: false)
-        guard parts.count >= 1 else { return }
-
-        let requestID = String(parts[0])
-        let rssiStr = parts.count > 1 ? String(parts[1]) : ""
-        let locationStr = parts.count > 2 ? String(parts[2]) : ""
-        let tokenStr = parts.count > 3 ? String(parts[3]) : ""
-
+    private func handlePing(from peerID: PeerID, senderNoiseKey: Data?, message: BeaconWire.Message, transport: PeerLocation.TransportType) {
         // Only favorites may ping us at all
         guard let noiseKey = senderNoiseKey,
               let favorite = favoritesService.favorites[noiseKey],
@@ -239,20 +238,14 @@ final class BeaconService: ObservableObject {
             HapticManager.shared.pingStarted()
         }
 
-        let tokenData = tokenStr.isEmpty ? nil : Data(base64Encoded: tokenStr)
-        if !tokenStr.isEmpty && tokenData == nil {
+        if message.hasMalformedToken {
             SecureLogger.error("[Beacon] Malformed UWB token in PING from \(peerID.id.prefix(8))", category: .session)
         }
 
         // Store sender's location (their disclosure, so always accepted)
-        if let location = decodeLocation(locationStr) {
-            storePeerLocation(
-                noiseKey: noiseKey,
-                lat: location.lat, lon: location.lon,
-                alt: location.alt, hacc: location.hacc, vacc: location.vacc,
-                rssi: Int(rssiStr), transport: transport, pingMs: 0,
-                uwbTokenPresent: tokenData != nil
-            )
+        if let location = message.location {
+            storePeerLocation(noiseKey: noiseKey, location: location, rssi: message.rssi,
+                              transport: transport, pingMs: 0, uwbTokenPresent: message.uwbToken != nil)
             auditLog.record(.locationReceived, peerFingerprint: PeerID(publicKey: noiseKey).id, peerName: peerName(for: noiseKey))
         }
 
@@ -266,26 +259,18 @@ final class BeaconService: ObservableObject {
 
         // Peer offered a UWB token: start ranging and reciprocate in the PONG
         var includeToken = false
-        if let tokenData {
+        if let tokenData = message.uwbToken {
             uwbManager.handleReceivedToken(from: PeerID(publicKey: noiseKey), tokenData: tokenData)
             includeToken = true
         }
 
-        sendPong(to: peerID, noiseKey: noiseKey, requestID: requestID, includeUWBToken: includeToken)
+        sendPong(to: peerID, noiseKey: noiseKey, requestID: message.requestID, includeUWBToken: includeToken)
     }
 
     // MARK: - Handle PONG
 
-    private func handlePong(from peerID: PeerID, content: String, transport: PeerLocation.TransportType) {
-        let parts = content.dropFirst(7).split(separator: ":", maxSplits: 4, omittingEmptySubsequences: false)
-        guard parts.count >= 1 else { return }
-
-        let requestID = String(parts[0])
-        let rssiStr = parts.count > 1 ? String(parts[1]) : ""
-        let locationStr = parts.count > 2 ? String(parts[2]) : ""
-        let tokenStr = parts.count > 3 ? String(parts[3]) : ""
-
-        guard let pending = pendingPings.removeValue(forKey: requestID) else {
+    private func handlePong(from peerID: PeerID, message: BeaconWire.Message, transport: PeerLocation.TransportType) {
+        guard let pending = pendingPings.removeValue(forKey: message.requestID) else {
             SecureLogger.debug("[Beacon] Unsolicited PONG from \(peerID.id.prefix(8)) dropped", category: .session)
             return
         }
@@ -296,24 +281,16 @@ final class BeaconService: ObservableObject {
         isPinging = false
         HapticManager.shared.pingResponseReceived()
 
-        var validTokenReceived = false
-        if !tokenStr.isEmpty {
-            if let tokenData = Data(base64Encoded: tokenStr) {
-                uwbManager.handleReceivedToken(from: PeerID(publicKey: pending.noiseKey), tokenData: tokenData)
-                validTokenReceived = true
-            } else {
-                SecureLogger.error("[Beacon] Malformed UWB token in PONG from \(peerID.id.prefix(8))", category: .session)
-            }
+        if message.hasMalformedToken {
+            SecureLogger.error("[Beacon] Malformed UWB token in PONG from \(peerID.id.prefix(8))", category: .session)
+        }
+        if let tokenData = message.uwbToken {
+            uwbManager.handleReceivedToken(from: PeerID(publicKey: pending.noiseKey), tokenData: tokenData)
         }
 
-        if let location = decodeLocation(locationStr) {
-            storePeerLocation(
-                noiseKey: pending.noiseKey,
-                lat: location.lat, lon: location.lon,
-                alt: location.alt, hacc: location.hacc, vacc: location.vacc,
-                rssi: Int(rssiStr), transport: transport, pingMs: rtt,
-                uwbTokenPresent: validTokenReceived
-            )
+        if let location = message.location {
+            storePeerLocation(noiseKey: pending.noiseKey, location: location, rssi: message.rssi,
+                              transport: transport, pingMs: rtt, uwbTokenPresent: message.uwbToken != nil)
             auditLog.record(.locationReceived, peerFingerprint: PeerID(publicKey: pending.noiseKey).id, peerName: peerName(for: pending.noiseKey))
         }
     }
@@ -357,29 +334,21 @@ final class BeaconService: ObservableObject {
             to: level
         )
         // Altitude is omitted at coarse precision (it would leak floor-level detail)
-        let altitude = level == .exact ? Int(loc.altitude) : 0
-        let verticalAccuracy = level == .exact ? Int(loc.verticalAccuracy) : -1
-        return String(format: "%.6f,%.6f,%d,%d,%d",
-                      coarse.latitude, coarse.longitude,
-                      altitude, Int(coarse.horizontalAccuracy), verticalAccuracy)
+        return BeaconWire.encodeLocation(BeaconWire.Location(
+            lat: coarse.latitude, lon: coarse.longitude,
+            alt: level == .exact ? Int(loc.altitude) : 0,
+            hacc: Int(coarse.horizontalAccuracy),
+            vacc: level == .exact ? Int(loc.verticalAccuracy) : -1
+        ))
     }
 
-    private func decodeLocation(_ str: String) -> (lat: Double, lon: Double, alt: Int, hacc: Int, vacc: Int)? {
-        guard !str.isEmpty else { return nil }
-        let parts = str.split(separator: ",")
-        guard parts.count == 5,
-              let lat = Double(parts[0]), let lon = Double(parts[1]),
-              let alt = Int(parts[2]), let hacc = Int(parts[3]), let vacc = Int(parts[4]) else { return nil }
-        return (lat, lon, alt, hacc, vacc)
-    }
-
-    private func storePeerLocation(noiseKey: Data, lat: Double, lon: Double, alt: Int, hacc: Int, vacc: Int,
+    private func storePeerLocation(noiseKey: Data, location loc: BeaconWire.Location,
                                    rssi: Int?, transport: PeerLocation.TransportType, pingMs: Int,
                                    uwbTokenPresent: Bool = false) {
         let peerID = PeerID(publicKey: noiseKey)
         var location = PeerLocation(
             peerIDString: peerID.id, gpsEnabled: true,
-            latitude: lat, longitude: lon, altitude: Double(alt), horizontalAccuracy: Double(hacc),
+            latitude: loc.lat, longitude: loc.lon, altitude: Double(loc.alt), horizontalAccuracy: Double(loc.hacc),
             transport: transport, pingMs: pingMs, peerRSSI: rssi,
             uwbSupported: uwbTokenPresent, uwbToken: nil, timestamp: Date()
         )

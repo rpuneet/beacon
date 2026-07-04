@@ -22,18 +22,6 @@ protocol LocationStateManaging: AnyObject {
     #endif
 }
 
-#if os(iOS)
-// No-op defaults so test doubles that don't care about heading stay minimal
-extension LocationStateManaging {
-    var headingFilter: CLLocationDegrees {
-        get { 0 }
-        set {}
-    }
-    func startUpdatingHeading() {}
-    func stopUpdatingHeading() {}
-}
-#endif
-
 protocol LocationStateGeocoding: AnyObject {
     func cancelGeocode()
     func reverseGeocodeLocation(
