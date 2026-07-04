@@ -18,6 +18,14 @@ struct TrackingView: View {
     @State private var proximityLevel: ProximityLevel = .unknown
     @State private var lastHapticLevel: ProximityLevel = .unknown
 
+    // Found! detection: sustained close proximity triggers a celebration
+    private static let foundDistanceMeters: Float = 3.0
+    private static let foundRSSIThreshold = -40
+    private static let foundSustainedSeconds: TimeInterval = 5.0
+    @State private var foundZoneEntry: Date?
+    @State private var hasTriggeredFound = false
+    @State private var showFoundCelebration = false
+
     enum ProximityLevel: Int, Comparable {
         case unknown = 0
         case far = 1
@@ -203,6 +211,7 @@ struct TrackingView: View {
         .onChange(of: peerLocation.uwbDistance) { _ in
             updateProximityLevel()
         }
+        .foundCelebration(isPresented: $showFoundCelebration, peerName: peerName)
     }
 
     // MARK: - Direction Arrow View
@@ -334,6 +343,36 @@ struct TrackingView: View {
         if newLevel != lastHapticLevel && newLevel != .unknown {
             triggerHaptic(for: newLevel)
             lastHapticLevel = newLevel
+        }
+
+        checkFoundCondition()
+    }
+
+    /// Trigger the celebration after the peer stays within the found zone
+    /// (UWB < 3 m, or very strong RSSI) for a sustained period.
+    private func checkFoundCondition() {
+        let inZone: Bool
+        if let uwbDist = peerLocation.uwbDistance {
+            inZone = uwbDist < Self.foundDistanceMeters
+        } else if let rssi = peerLocation.peerRSSI {
+            inZone = rssi > Self.foundRSSIThreshold
+        } else {
+            inZone = false
+        }
+
+        guard inZone else {
+            foundZoneEntry = nil
+            return
+        }
+
+        let entry = foundZoneEntry ?? Date()
+        foundZoneEntry = entry
+
+        if !hasTriggeredFound && Date().timeIntervalSince(entry) >= Self.foundSustainedSeconds {
+            hasTriggeredFound = true
+            withAnimation(.easeIn(duration: 0.3)) {
+                showFoundCelebration = true
+            }
         }
     }
 

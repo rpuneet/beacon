@@ -22,9 +22,13 @@ Beacon allows mutual favorites to share their GPS location with each other on-de
 Beacon uses BitChat's existing **private message** system with special message prefixes:
 
 ```
-[PING]:ID:rssi:lat,lon,alt,hacc,vacc    → "Here's my location, send yours"
-[PONG]:ID:rssi:lat,lon,alt,hacc,vacc    → "Here's my location back"
+[PING]:ID:rssi:lat,lon,alt,hacc,vacc[:uwbToken]    → "Here's my location, send yours"
+[PONG]:ID:rssi:lat,lon,alt,hacc,vacc[:uwbToken]    → "Here's my location back"
 ```
+
+The optional trailing field carries a base64 Nearby Interaction discovery
+token; it is exchanged while tracking to enable UWB precision ranging.
+The location field is coarsened per `BeaconSettings` before sending.
 
 ---
 
@@ -355,11 +359,26 @@ guard let noiseKey = senderNoiseKey,
 }
 ```
 
-### User Control
+Additionally, `BeaconSettings.canShare` enforces the privacy policy before any
+PONG is sent. A denied PING gets **no response at all**, so a denied peer
+cannot probe our presence.
+
+### User Control (BeaconSettings + BeaconSettingsView)
 
 - Must explicitly **add someone as a favorite** to be trackable
+- **Global sharing toggle** — kill switch for all location disclosure
+- **Mutual favorites only** (default on) — they must favorite you back
+- **Precision levels** — exact / ~1 km / ~5 km; coarse levels snap coordinates
+  to a grid cell center so the true position is never transmitted, and omit altitude
+- **Per-friend overrides** — allow/deny and precision per favorite
 - Can **disable location** in iOS Settings
-- Location is **on-demand only** (manual ping or 30s beacon mode)
+- Location is **on-demand only** (manual ping or beacon mode)
+
+### Audit Log (BeaconAuditLog)
+
+Every disclosure is recorded locally (who, when, at what precision) and shown
+in the settings sheet. An orange sharing indicator appears in the Beacon
+header whenever a location was sent in the last 5 minutes.
 
 ### Data Minimization
 

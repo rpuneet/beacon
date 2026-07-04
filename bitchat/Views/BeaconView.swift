@@ -13,10 +13,13 @@ struct BeaconView: View {
     @ObservedObject private var beaconService = BeaconService.shared
     @ObservedObject private var favoritesService = FavoritesPersistenceService.shared
     @ObservedObject private var locationManager = LocationStateManager.shared
+    @ObservedObject private var auditLog = BeaconAuditLog.shared
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedFavoriteKey: Data?
+    @State private var showSettings = false
+    @State private var showFullTracking = false
     @State private var mapRegion = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
         span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
@@ -62,6 +65,27 @@ struct BeaconView: View {
             locationManager.endTrackingMode()
             beaconService.stopTracking()
         }
+        .sheet(isPresented: $showSettings) {
+            BeaconSettingsView()
+        }
+        #if os(iOS)
+        .fullScreenCover(isPresented: $showFullTracking) {
+            fullTrackingView
+        }
+        #else
+        .sheet(isPresented: $showFullTracking) {
+            fullTrackingView
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var fullTrackingView: some View {
+        if let location = selectedLocation {
+            TrackingView(peerLocation: location, peerName: selectedNickname) {
+                showFullTracking = false
+            }
+        }
     }
 
     // MARK: - Header
@@ -79,6 +103,24 @@ struct BeaconView: View {
                 Text("\(beaconService.peersWithLocationCount)/\(favoritesCount)")
                     .font(.bitchatSystem(size: 12, design: .monospaced))
                     .foregroundColor(.secondary)
+            }
+
+            // Sharing indicator: we disclosed our location recently
+            if auditLog.isActivelySharing {
+                Button(action: { showSettings = true }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "location.fill")
+                            .font(.system(size: 9))
+                        Text("\(auditLog.activeSharingPeers.count)")
+                            .font(.bitchatSystem(size: 10, weight: .semibold, design: .monospaced))
+                    }
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.orange.opacity(0.15))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
             }
 
             Spacer()
@@ -113,6 +155,15 @@ struct BeaconView: View {
             }
             .buttonStyle(.plain)
             .disabled(beaconService.isPinging)
+
+            // Privacy settings
+            Button(action: { showSettings = true }) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 14))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(textColor)
 
             Button(action: { dismiss() }) {
                 Image(systemName: "xmark")
@@ -301,6 +352,14 @@ struct BeaconView: View {
             }
 
             Spacer()
+
+            // Expand into full-screen Find mode (compass + UWB + haptics)
+            Button(action: { showFullTracking = true }) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right.circle.fill")
+                    .font(.system(size: 22))
+                    .foregroundColor(textColor)
+            }
+            .buttonStyle(.plain)
 
             Button(action: stopTracking) {
                 Image(systemName: "xmark.circle.fill")
