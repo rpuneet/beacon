@@ -8,6 +8,7 @@
 
 import Foundation
 import Combine
+import BitLogger
 
 /// Controls who can receive our location via Beacon and at what precision.
 @MainActor
@@ -95,22 +96,41 @@ final class BeaconSettings: ObservableObject {
         self.defaults = defaults
         self.isSharingEnabled = defaults.object(forKey: Keys.sharingEnabled) as? Bool ?? true
         self.requireMutualFavorites = defaults.object(forKey: Keys.requireMutual) as? Bool ?? true
-        if let raw = defaults.string(forKey: Keys.precision), let level = PrecisionLevel(rawValue: raw) {
-            self.precision = level
+
+        if let raw = defaults.string(forKey: Keys.precision) {
+            // Unrecognized stored value fails toward the coarsest disclosure
+            if let level = PrecisionLevel(rawValue: raw) {
+                self.precision = level
+            } else {
+                SecureLogger.warning("[Beacon] Unrecognized precision '\(raw)', falling back to coarsest", category: .session)
+                self.precision = .city
+            }
         } else {
             self.precision = .exact
         }
-        if let data = defaults.data(forKey: Keys.overrides),
-           let decoded = try? JSONDecoder().decode([String: PeerOverride].self, from: data) {
-            self.overrides = decoded
+
+        if let data = defaults.data(forKey: Keys.overrides) {
+            do {
+                self.overrides = try JSONDecoder().decode([String: PeerOverride].self, from: data)
+            } catch {
+                // A lost "deny" must not become an "allow": fail closed until
+                // the user consciously re-enables sharing.
+                SecureLogger.error("[Beacon] Failed to decode peer overrides, disabling sharing: \(error)", category: .session)
+                self.overrides = [:]
+                self.isSharingEnabled = false
+                defaults.set(false, forKey: Keys.sharingEnabled)
+            }
         } else {
             self.overrides = [:]
         }
     }
 
     private func persistOverrides() {
-        if let data = try? JSONEncoder().encode(overrides) {
+        do {
+            let data = try JSONEncoder().encode(overrides)
             defaults.set(data, forKey: Keys.overrides)
+        } catch {
+            SecureLogger.error("[Beacon] Failed to persist peer overrides: \(error)", category: .session)
         }
     }
 

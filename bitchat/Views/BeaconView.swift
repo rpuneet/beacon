@@ -85,6 +85,21 @@ struct BeaconView: View {
             TrackingView(peerLocation: location, peerName: selectedNickname) {
                 showFullTracking = false
             }
+        } else {
+            // Peer location vanished mid-presentation; never strand the user
+            // on an empty cover with no dismiss control
+            ZStack {
+                Color.black.ignoresSafeArea()
+                VStack(spacing: 16) {
+                    Text("peer unavailable")
+                        .font(.bitchatSystem(size: 16, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    Button("close") { showFullTracking = false }
+                        .font(.bitchatSystem(size: 14, design: .monospaced))
+                        .foregroundColor(.green)
+                        .buttonStyle(.plain)
+                }
+            }
         }
     }
 

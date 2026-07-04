@@ -42,8 +42,17 @@ final class BeaconService: ObservableObject {
     private var beaconTimer: Timer?
     private var trackingTimer: Timer?
     private var trackingPeerNoiseKey: Data?
+    private var trackedPeerWasConnected = true
     private var pendingPings: [String: (noiseKey: Data, sentAt: Date)] = [:]
+    private var lastSentAudit: [String: Date] = [:]
+    private var lastUWBFailureLogged: [String: String] = [:]
     private var cancellables = Set<AnyCancellable>()
+
+    /// Unanswered pings older than this are dropped (and logged)
+    private static let pendingPingMaxAge: TimeInterval = 10
+    /// Outgoing disclosures are audited at most once per peer per window,
+    /// so 1 Hz tracking pings don't flood the audit log
+    private static let sentAuditThrottle: TimeInterval = 60
 
     private var locationManager: LocationStateManager { .shared }
     private var favoritesService: FavoritesPersistenceService { .shared }
@@ -85,6 +94,7 @@ final class BeaconService: ObservableObject {
         stopTracking()
         SecureLogger.info("[Beacon] Tracking started", category: .session)
         trackingPeerNoiseKey = peerNoiseKey
+        trackedPeerWasConnected = true
         auditLog.record(.trackingStarted, peerFingerprint: PeerID(publicKey: peerNoiseKey).id, peerName: peerName(for: peerNoiseKey))
         pingSinglePeer(noiseKey: peerNoiseKey)
         trackingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -106,16 +116,26 @@ final class BeaconService: ObservableObject {
     private func pingSinglePeer(noiseKey: Data) {
         guard let ble = bleService else { return }
         let connectedPeers = ble.getConnectedPeersWithNoiseKeys()
-        guard let (peerID, _) = connectedPeers.first(where: { $0.noiseKey == noiseKey }) else { return }
+        guard let (peerID, _) = connectedPeers.first(where: { $0.noiseKey == noiseKey }) else {
+            if trackedPeerWasConnected {
+                trackedPeerWasConnected = false
+                SecureLogger.warning("[Beacon] Tracked peer out of range", category: .session)
+            }
+            return
+        }
+        trackedPeerWasConnected = true
 
         let requestID = UUID().uuidString.prefix(8).description
         let rssi = ble.getRSSI(for: peerID).map { String($0) } ?? ""
         // Tracking mode wants UWB precision: offer our discovery token
         let token = uwbTokenField(for: noiseKey, forceExchange: false)
-        let content = "[PING]:\(requestID):\(rssi):\(encodeLocation(for: noiseKey))\(token)"
+        let locationStr = encodeLocation(for: noiseKey)
+        let content = "[PING]:\(requestID):\(rssi):\(locationStr)\(token)"
 
+        prunePendingPings()
         pendingPings[requestID] = (noiseKey: noiseKey, sentAt: Date())
         ble.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: requestID)
+        auditLocationSent(noiseKey: noiseKey, locationStr: locationStr)
     }
 
     // MARK: - Ping All Favorites
@@ -133,20 +153,46 @@ final class BeaconService: ObservableObject {
 
         isPinging = true
 
+        prunePendingPings()
         for (peerID, noiseKey) in connectedFavorites {
             let requestID = UUID().uuidString.prefix(8).description
             let rssi = ble.getRSSI(for: peerID).map { String($0) } ?? ""
-            let content = "[PING]:\(requestID):\(rssi):\(encodeLocation(for: noiseKey))"
+            let locationStr = encodeLocation(for: noiseKey)
+            let content = "[PING]:\(requestID):\(rssi):\(locationStr)"
 
             pendingPings[requestID] = (noiseKey: noiseKey, sentAt: Date())
             ble.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: requestID)
+            auditLocationSent(noiseKey: noiseKey, locationStr: locationStr)
             SecureLogger.info("[Beacon] PING → \(peerID.id.prefix(8))", category: .session)
         }
 
         // Timeout after 5s
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             self?.isPinging = false
+            self?.prunePendingPings()
         }
+    }
+
+    /// Drop unanswered pings so the pending table can't grow unboundedly
+    /// against an unresponsive peer (1 Hz tracking would leak forever).
+    private func prunePendingPings() {
+        let cutoff = Date().addingTimeInterval(-Self.pendingPingMaxAge)
+        let stale = pendingPings.filter { $0.value.sentAt < cutoff }
+        guard !stale.isEmpty else { return }
+        for key in stale.keys { pendingPings.removeValue(forKey: key) }
+        SecureLogger.info("[Beacon] \(stale.count) ping(s) went unanswered", category: .session)
+    }
+
+    /// Audit an outgoing location disclosure, throttled per peer.
+    private func auditLocationSent(noiseKey: Data, locationStr: String) {
+        guard !locationStr.isEmpty else { return }
+        let fingerprint = PeerID(publicKey: noiseKey).id
+        if let last = lastSentAudit[fingerprint], Date().timeIntervalSince(last) < Self.sentAuditThrottle {
+            return
+        }
+        lastSentAudit[fingerprint] = Date()
+        let precision = settings.effectivePrecision(for: noiseKey)
+        auditLog.record(.locationSent, peerFingerprint: fingerprint, peerName: peerName(for: noiseKey), precision: precision.displayName)
     }
 
     // MARK: - Handle Incoming Messages
@@ -181,6 +227,11 @@ final class BeaconService: ObservableObject {
 
         SecureLogger.info("[Beacon] PING ← \(peerID.id.prefix(8))", category: .session)
 
+        let tokenData = tokenStr.isEmpty ? nil : Data(base64Encoded: tokenStr)
+        if !tokenStr.isEmpty && tokenData == nil {
+            SecureLogger.error("[Beacon] Malformed UWB token in PING from \(peerID.id.prefix(8))", category: .session)
+        }
+
         // Store sender's location (their disclosure, so always accepted)
         if let location = decodeLocation(locationStr) {
             storePeerLocation(
@@ -188,7 +239,7 @@ final class BeaconService: ObservableObject {
                 lat: location.lat, lon: location.lon,
                 alt: location.alt, hacc: location.hacc, vacc: location.vacc,
                 rssi: Int(rssiStr), transport: transport, pingMs: 0,
-                uwbTokenPresent: !tokenStr.isEmpty
+                uwbTokenPresent: tokenData != nil
             )
             auditLog.record(.locationReceived, peerFingerprint: PeerID(publicKey: noiseKey).id, peerName: peerName(for: noiseKey))
         }
@@ -203,7 +254,7 @@ final class BeaconService: ObservableObject {
 
         // Peer offered a UWB token: start ranging and reciprocate in the PONG
         var includeToken = false
-        if !tokenStr.isEmpty, let tokenData = Data(base64Encoded: tokenStr) {
+        if let tokenData {
             uwbManager.handleReceivedToken(from: PeerID(publicKey: noiseKey), tokenData: tokenData)
             includeToken = true
         }
@@ -222,7 +273,10 @@ final class BeaconService: ObservableObject {
         let locationStr = parts.count > 2 ? String(parts[2]) : ""
         let tokenStr = parts.count > 3 ? String(parts[3]) : ""
 
-        guard let pending = pendingPings.removeValue(forKey: requestID) else { return }
+        guard let pending = pendingPings.removeValue(forKey: requestID) else {
+            SecureLogger.debug("[Beacon] Unsolicited PONG from \(peerID.id.prefix(8)) dropped", category: .session)
+            return
+        }
 
         let rtt = Int(Date().timeIntervalSince(pending.sentAt) * 1000)
         SecureLogger.info("[Beacon] PONG ← \(peerID.id.prefix(8)) RTT:\(rtt)ms", category: .session)
@@ -230,8 +284,14 @@ final class BeaconService: ObservableObject {
         isPinging = false
         HapticManager.shared.pingResponseReceived()
 
-        if !tokenStr.isEmpty, let tokenData = Data(base64Encoded: tokenStr) {
-            uwbManager.handleReceivedToken(from: PeerID(publicKey: pending.noiseKey), tokenData: tokenData)
+        var validTokenReceived = false
+        if !tokenStr.isEmpty {
+            if let tokenData = Data(base64Encoded: tokenStr) {
+                uwbManager.handleReceivedToken(from: PeerID(publicKey: pending.noiseKey), tokenData: tokenData)
+                validTokenReceived = true
+            } else {
+                SecureLogger.error("[Beacon] Malformed UWB token in PONG from \(peerID.id.prefix(8))", category: .session)
+            }
         }
 
         if let location = decodeLocation(locationStr) {
@@ -240,7 +300,7 @@ final class BeaconService: ObservableObject {
                 lat: location.lat, lon: location.lon,
                 alt: location.alt, hacc: location.hacc, vacc: location.vacc,
                 rssi: Int(rssiStr), transport: transport, pingMs: rtt,
-                uwbTokenPresent: !tokenStr.isEmpty
+                uwbTokenPresent: validTokenReceived
             )
             auditLog.record(.locationReceived, peerFingerprint: PeerID(publicKey: pending.noiseKey).id, peerName: peerName(for: pending.noiseKey))
         }
@@ -257,9 +317,10 @@ final class BeaconService: ObservableObject {
         ble.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: UUID().uuidString)
         SecureLogger.info("[Beacon] PONG → \(peerID.id.prefix(8))", category: .session)
 
-        if !locationStr.isEmpty {
-            let precision = settings.effectivePrecision(for: noiseKey)
-            auditLog.record(.locationSent, peerFingerprint: PeerID(publicKey: noiseKey).id, peerName: peerName(for: noiseKey), precision: precision.displayName)
+        if locationStr.isEmpty {
+            SecureLogger.info("[Beacon] PONG sent without location (enabled=\(locationManager.isLocationEnabled), hasFix=\(locationManager.currentLocation != nil))", category: .session)
+        } else {
+            auditLocationSent(noiseKey: noiseKey, locationStr: locationStr)
         }
     }
 
@@ -355,12 +416,22 @@ final class BeaconService: ObservableObject {
 
     private func applyUWBSessions(_ sessions: [PeerID: UWBTrackingManager.UWBSessionState]) {
         for (peerID, state) in sessions {
-            guard case .active(let distance, let direction) = state,
-                  let distance,
-                  let existing = peerLocations[peerID.id] else { continue }
-            var location = existing
-            location.updateUWBDistance(distance, direction: direction)
-            peerLocations[peerID.id] = location
+            switch state {
+            case .active(let distance, let direction):
+                lastUWBFailureLogged.removeValue(forKey: peerID.id)
+                guard let distance, let existing = peerLocations[peerID.id] else { continue }
+                var location = existing
+                location.updateUWBDistance(distance, direction: direction)
+                peerLocations[peerID.id] = location
+            case .failed(let message):
+                // Surface the failure instead of dropping it (once per message)
+                if lastUWBFailureLogged[peerID.id] != message {
+                    lastUWBFailureLogged[peerID.id] = message
+                    SecureLogger.warning("[Beacon] UWB session failed for \(peerID.id.prefix(8)): \(message)", category: .session)
+                }
+            case .connecting, .suspended:
+                break
+            }
         }
     }
 
@@ -375,9 +446,11 @@ final class BeaconService: ObservableObject {
         let token = uwbTokenField(for: noiseKey, forceExchange: true)
         guard !token.isEmpty else { return }
 
+        let locationStr = encodeLocation(for: noiseKey)
         pendingPings[requestID] = (noiseKey: noiseKey, sentAt: Date())
-        ble.sendPrivateMessage("[PING]:\(requestID):\(rssi):\(encodeLocation(for: noiseKey))\(token)",
+        ble.sendPrivateMessage("[PING]:\(requestID):\(rssi):\(locationStr)\(token)",
                                to: peerID, recipientNickname: "", messageID: requestID)
+        auditLocationSent(noiseKey: noiseKey, locationStr: locationStr)
     }
 
     // MARK: - Helpers

@@ -8,6 +8,7 @@
 
 import Foundation
 import Combine
+import BitLogger
 
 struct BeaconAuditEvent: Codable, Identifiable, Equatable {
     enum EventType: String, Codable {
@@ -121,15 +122,21 @@ final class BeaconAuditLog: ObservableObject {
     }
 
     private func load() {
-        guard let data = defaults.data(forKey: Self.storageKey),
-              let decoded = try? JSONDecoder().decode([BeaconAuditEvent].self, from: data) else { return }
-        events = decoded
-        prune()
+        guard let data = defaults.data(forKey: Self.storageKey) else { return }
+        do {
+            events = try JSONDecoder().decode([BeaconAuditEvent].self, from: data)
+            prune()
+        } catch {
+            SecureLogger.error("[Beacon] Failed to decode audit log, history lost: \(error)", category: .session)
+        }
     }
 
     private func save() {
-        if let data = try? JSONEncoder().encode(events) {
+        do {
+            let data = try JSONEncoder().encode(events)
             defaults.set(data, forKey: Self.storageKey)
+        } catch {
+            SecureLogger.error("[Beacon] Failed to persist audit log: \(error)", category: .session)
         }
     }
 }

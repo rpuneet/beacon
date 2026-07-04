@@ -102,6 +102,35 @@ final class BeaconPrivacyTests: XCTestCase {
         XCTAssertEqual(reloaded.override(for: peerB).precision, .city)
     }
 
+    // MARK: - Fail-Closed Behavior
+
+    func testCorruptOverridesFailClosed() {
+        defaults.set(Data("not json".utf8), forKey: "beacon.peerOverrides")
+
+        let settings = BeaconSettings(defaults: defaults)
+        XCTAssertFalse(settings.isSharingEnabled,
+                       "Losing per-friend denies must disable sharing, not silently allow everyone")
+        XCTAssertFalse(settings.canShare(with: peerA, isFavorite: true, isMutual: true))
+    }
+
+    func testUnrecognizedPrecisionFallsBackToCoarsest() {
+        defaults.set("ultra-precise-future-level", forKey: "beacon.precision")
+
+        let settings = BeaconSettings(defaults: defaults)
+        XCTAssertEqual(settings.precision, .city,
+                       "Unknown precision must resolve to the coarsest disclosure, never exact")
+    }
+
+    func testCorruptAuditLogDoesNotCrashAndStartsEmpty() {
+        defaults.set(Data("garbage".utf8), forKey: "beacon.auditLog")
+
+        let log = BeaconAuditLog(defaults: defaults)
+        XCTAssertTrue(log.events.isEmpty)
+        // Recording still works after a corrupt load
+        log.record(.locationSent, peerFingerprint: "abc", peerName: "alice")
+        XCTAssertEqual(log.events.count, 1)
+    }
+
     // MARK: - Coarsening
 
     func testExactPrecisionIsPassthrough() {
