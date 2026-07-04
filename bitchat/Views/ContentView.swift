@@ -151,7 +151,6 @@ struct ContentView: View {
         .sheet(isPresented: $appChromeModel.isAppInfoPresented) {
             AppInfoView()
         }
-        .overlay { BeaconSetupGate() }
         .sheet(isPresented: Binding(
             get: { appChromeModel.showingFingerprintFor != nil && !showSidebar && selectedPrivatePeerID == nil },
             set: { _ in appChromeModel.clearFingerprint() }

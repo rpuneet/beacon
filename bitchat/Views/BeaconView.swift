@@ -10,6 +10,11 @@ import SwiftUI
 import MapKit
 
 struct BeaconView: View {
+    /// Root mode: the map is the app's home screen — hamburger instead of
+    /// a dismiss button (set by BeaconAppRoot).
+    var isRootMode = false
+    var onMenuTap: (() -> Void)? = nil
+
     @ObservedObject private var beaconService = BeaconService.shared
     @ObservedObject private var favoritesService = FavoritesPersistenceService.shared
     @ObservedObject private var locationManager = LocationStateManager.shared
@@ -124,6 +129,16 @@ struct BeaconView: View {
 
     private var headerView: some View {
         HStack(spacing: 12) {
+            if isRootMode {
+                Button(action: { onMenuTap?() }) {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(textColor)
+            }
+
             Text("beacon")
                 .font(.bitchatSystem(size: 18, design: .monospaced))
                 .foregroundColor(textColor)
@@ -197,13 +212,15 @@ struct BeaconView: View {
             .buttonStyle(.plain)
             .foregroundColor(textColor)
 
-            Button(action: { dismiss() }) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 28, height: 28)
+            if !isRootMode {
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(textColor)
             }
-            .buttonStyle(.plain)
-            .foregroundColor(textColor)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

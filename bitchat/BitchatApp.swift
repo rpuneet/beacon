@@ -30,7 +30,7 @@ struct BitchatApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            BeaconAppRoot()
                 .environment(\.appTheme, AppTheme(rawValue: appThemeRawValue) ?? .matrix)
                 .environmentObject(runtime.publicChatModel)
                 .environmentObject(runtime.privateInboxModel)
