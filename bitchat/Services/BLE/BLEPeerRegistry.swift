@@ -71,6 +71,14 @@ struct BLEPeerRegistry {
         peers[peerID]
     }
 
+    /// Connected peers paired with their noise public keys (for beacon feature)
+    func connectedPeersWithNoiseKeys() -> [(peerID: PeerID, noiseKey: Data)] {
+        peers.values.compactMap { info in
+            guard info.isConnected, let noiseKey = info.noisePublicKey else { return nil }
+            return (peerID: info.peerID, noiseKey: noiseKey)
+        }
+    }
+
     mutating func upsert(_ info: BLEPeerInfo) {
         peers[info.peerID] = info
     }

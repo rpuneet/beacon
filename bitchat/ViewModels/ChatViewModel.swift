@@ -819,6 +819,11 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
         self.readReceiptsDefaults = readReceiptsDefaults
         self.sentReadReceipts = ChatViewModelBootstrapper.loadPersistedReadReceipts(userDefaults: readReceiptsDefaults)
 
+        // Configure BeaconService with BLE transport
+        if let bleService = transport as? BLEService {
+            BeaconService.shared.configure(ble: bleService)
+        }
+
         // Republish on every store change so SwiftUI observers of the
         // view model refresh. This replaces the UI-update role of the old
         // `PrivateChatManager.@Published` dictionaries and the old

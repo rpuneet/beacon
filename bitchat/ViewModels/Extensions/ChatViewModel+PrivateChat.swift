@@ -29,6 +29,12 @@ extension ChatViewModel {
         id: NostrIdentity,
         messageTimestamp: Date
     ) {
+        // Beacon PING/PONG over Nostr: consume before the coordinator stores it as chat
+        if let pm = PrivateMessagePacket.decode(from: payload.data),
+           pm.content.hasPrefix("[PING]:") || pm.content.hasPrefix("[PONG]:") {
+            BeaconService.shared.handlePrivateMessage(from: convKey, senderNoiseKey: Data(hexString: senderPubkey), content: pm.content, transport: .relay)
+            return
+        }
         privateConversationCoordinator.handlePrivateMessage(
             payload,
             senderPubkey: senderPubkey,
@@ -130,6 +136,20 @@ extension ChatViewModel {
         messageTimestamp: Date,
         senderPubkey: String
     ) {
+        // Favorite/unfavorite notifications embedded as private messages, and
+        // beacon PING/PONG: consume before the coordinator stores them as chat
+        if let pm = PrivateMessagePacket.decode(from: payload.data) {
+            if pm.content.hasPrefix("[FAVORITED]") || pm.content.hasPrefix("[UNFAVORITED]") {
+                if let key = actualSenderNoiseKey {
+                    handleFavoriteNotificationFromMesh(pm.content, from: PeerID(hexData: key), senderNickname: senderNickname)
+                }
+                return
+            }
+            if pm.content.hasPrefix("[PING]:") || pm.content.hasPrefix("[PONG]:") {
+                BeaconService.shared.handlePrivateMessage(from: targetPeerID, senderNoiseKey: actualSenderNoiseKey, content: pm.content, transport: .relay)
+                return
+            }
+        }
         privateConversationCoordinator.handlePrivateMessage(
             payload,
             actualSenderNoiseKey: actualSenderNoiseKey,
@@ -142,6 +162,14 @@ extension ChatViewModel {
 
     @MainActor
     func handlePrivateMessage(_ message: BitchatMessage) {
+        // Beacon PING/PONG over mesh: consume before the coordinator stores it as chat
+        if message.content.hasPrefix("[PING]:") || message.content.hasPrefix("[PONG]:") {
+            if let peerID = message.senderPeerID ?? getPeerIDForNickname(message.sender) {
+                let noiseKey = unifiedPeerService.getPeer(by: peerID)?.noisePublicKey
+                BeaconService.shared.handlePrivateMessage(from: peerID, senderNoiseKey: noiseKey, content: message.content, transport: .ble)
+            }
+            return
+        }
         privateConversationCoordinator.handlePrivateMessage(message)
     }
 

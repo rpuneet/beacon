@@ -46,6 +46,12 @@ private final class StubLocationManaging: LocationStateManaging {
     func requestLocation() {}
     func startUpdatingLocation() {}
     func stopUpdatingLocation() {}
+
+    #if os(iOS)
+    var headingFilter: CLLocationDegrees = 0
+    func startUpdatingHeading() {}
+    func stopUpdatingHeading() {}
+    #endif
 }
 
 private final class StubLocationGeocoder: LocationStateGeocoding {

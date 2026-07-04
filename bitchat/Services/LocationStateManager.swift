@@ -14,6 +14,12 @@ protocol LocationStateManaging: AnyObject {
     func requestLocation()
     func startUpdatingLocation()
     func stopUpdatingLocation()
+    #if os(iOS)
+    // Heading updates (for Beacon compass tracking)
+    var headingFilter: CLLocationDegrees { get set }
+    func startUpdatingHeading()
+    func stopUpdatingHeading()
+    #endif
 }
 
 protocol LocationStateGeocoding: AnyObject {
@@ -61,6 +67,21 @@ private final class CLLocationManagerAdapter: NSObject, LocationStateManaging {
     func stopUpdatingLocation() {
         base.stopUpdatingLocation()
     }
+
+    #if os(iOS)
+    var headingFilter: CLLocationDegrees {
+        get { base.headingFilter }
+        set { base.headingFilter = newValue }
+    }
+
+    func startUpdatingHeading() {
+        base.startUpdatingHeading()
+    }
+
+    func stopUpdatingHeading() {
+        base.stopUpdatingHeading()
+    }
+    #endif
 }
 
 private final class CLGeocoderAdapter: LocationStateGeocoding {
@@ -97,11 +118,24 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         case authorized
     }
 
+    // MARK: - Public Computed Properties (for beacon)
+
+    /// Whether location permission is granted
+    var isLocationEnabled: Bool {
+        permissionState == .authorized
+    }
+
+    /// Current CLLocation if available (for beacon feature)
+    var currentLocation: CLLocation? {
+        lastLocation
+    }
+
     // MARK: - Private Properties (CoreLocation)
 
     private let cl: LocationStateManaging
     private let geocoder: LocationStateGeocoding
     private var lastLocation: CLLocation?
+    private var lastLocationReceivedAt: Date?
     private var refreshTimer: Timer?
     private var isGeocoding: Bool = false
 
@@ -119,6 +153,12 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     @Published private(set) var selectedChannel: ChannelID = .mesh
     @Published var teleported: Bool = false
     @Published private(set) var locationNames: [GeohashChannelLevel: String] = [:]
+
+    // MARK: - Published State (Heading for Beacon)
+
+    /// Current device heading in degrees (0 = North, 90 = East)
+    @Published private(set) var currentHeading: Double?
+    private var headingObserverCount = 0
 
     // MARK: - Published State (Bookmarks)
 
@@ -286,6 +326,66 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
     }
 
+    // MARK: - Public API (Beacon Mode - High Precision GPS + Heading)
+
+    /// Begin high-precision tracking mode.
+    /// Uses maximum GPS accuracy for precise peer tracking.
+    func beginTrackingMode() {
+        guard permissionState == .authorized else { return }
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        cl.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        cl.distanceFilter = kCLDistanceFilterNone
+        cl.startUpdatingLocation()
+    }
+
+    /// End high-precision tracking mode and return to standby settings.
+    func endTrackingMode() {
+        cl.stopUpdatingLocation()
+        cl.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
+    }
+
+    /// Request a fresh location update with callback.
+    /// Returns cached location immediately if it's less than 10 seconds old.
+    /// - Parameter completion: Called when location is available or timeout (3s) occurs
+    func requestFreshLocation(completion: @escaping (CLLocation?) -> Void) {
+        guard permissionState == .authorized else {
+            completion(nil)
+            return
+        }
+
+        // If we received a location update recently (< 10 seconds), use cached immediately
+        if let cached = lastLocation,
+           let receivedAt = lastLocationReceivedAt,
+           Date().timeIntervalSince(receivedAt) < 10 {
+            completion(cached)
+            return
+        }
+
+        // Otherwise request fresh location
+        beginTrackingMode()
+        cl.requestLocation()
+
+        var hasCompleted = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: .init("LocationStateManager.didUpdateLocation"),
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            guard !hasCompleted else { return }
+            hasCompleted = true
+            completion(self?.lastLocation)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            NotificationCenter.default.removeObserver(observer)
+            guard !hasCompleted else { return }
+            hasCompleted = true
+            completion(self?.lastLocation)
+        }
+    }
+
     // MARK: - Public API (Channel Selection)
 
     func select(_ channel: ChannelID) {
@@ -386,12 +486,49 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let loc = locations.last else { return }
         lastLocation = loc
+        lastLocationReceivedAt = Date()
         computeChannels(from: loc.coordinate)
         reverseGeocodeLocation(loc)
+        // Notify any pending beacon location requests
+        NotificationCenter.default.post(name: .init("LocationStateManager.didUpdateLocation"), object: self)
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         SecureLogger.error("LocationStateManager: location error: \(error.localizedDescription)", category: .session)
+    }
+
+    #if os(iOS)
+    func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        // Use true heading if available, otherwise magnetic
+        let heading = newHeading.trueHeading >= 0 ? newHeading.trueHeading : newHeading.magneticHeading
+        Task { @MainActor in
+            self.currentHeading = heading
+        }
+    }
+    #endif
+
+    // MARK: - Heading Updates (for Beacon tracking)
+
+    /// Start receiving heading updates (call when entering tracking mode)
+    func startHeadingUpdates() {
+        #if os(iOS)
+        headingObserverCount += 1
+        if headingObserverCount == 1 {
+            cl.headingFilter = 5 // Update every 5 degrees
+            cl.startUpdatingHeading()
+        }
+        #endif
+    }
+
+    /// Stop receiving heading updates (call when leaving tracking mode)
+    func stopHeadingUpdates() {
+        #if os(iOS)
+        headingObserverCount = max(0, headingObserverCount - 1)
+        if headingObserverCount == 0 {
+            cl.stopUpdatingHeading()
+            Task { @MainActor in self.currentHeading = nil }
+        }
+        #endif
     }
 
     // MARK: - Private Helpers (Permission)

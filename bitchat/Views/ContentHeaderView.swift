@@ -16,6 +16,7 @@ struct ContentHeaderView: View {
     @Binding var showVerifySheet: Bool
     @Binding var showLocationNotes: Bool
     @Binding var notesGeohash: String?
+    @State private var showBeaconSheet = false
     var isNicknameFieldFocused: FocusState<Bool>.Binding
 
     let headerHeight: CGFloat
@@ -125,6 +126,18 @@ struct ContentHeaderView: View {
                     )
                 }
 
+                // Beacon button (mesh only), to the left of #mesh
+                if case .mesh = locationChannelsModel.selectedChannel {
+                    Button(action: { showBeaconSheet = true }) {
+                        BeaconIcon(size: 14)
+                            .headerTapTarget()
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(
+                        String(localized: "content.accessibility.beacon", comment: "Accessibility label for beacon button")
+                    )
+                }
+
                 Button(action: { appChromeModel.isLocationChannelsSheetPresented = true }) {
                     let badgeText: String = {
                         switch locationChannelsModel.selectedChannel {
@@ -188,6 +201,9 @@ struct ContentHeaderView: View {
             .sheet(isPresented: $showVerifySheet) {
                 VerificationSheetView(isPresented: $showVerifySheet)
                     .environmentObject(verificationModel)
+            }
+            .sheet(isPresented: $showBeaconSheet) {
+                BeaconView()
             }
         }
         .frame(height: headerHeight)

@@ -2,3 +2,5 @@
 
 // Optional include of local configs
 #include? "Local.xcconfig"
+
+PRODUCT_BUNDLE_IDENTIFIER = beacon.bitchat

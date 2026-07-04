@@ -111,11 +111,15 @@ struct PrivateMessagePacket {
     private enum TLVType: UInt8 {
         case messageID = 0x00
         case content = 0x01
+        // Fork extension: 2-byte big-endian length for content > 255 bytes
+        // (beacon PING/PONG with UWB token). Only emitted when needed, so
+        // messages <= 255 bytes stay byte-identical with upstream bitchat.
+        case content16 = 0x02
     }
 
     func encode() -> Data? {
         var data = Data()
-        data.reserveCapacity(2 + min(messageID.count, 255) + 2 + min(content.count, 255))
+        data.reserveCapacity(2 + min(messageID.count, 255) + 3 + min(content.count, 65535))
 
         // TLV for messageID
         guard let messageIDData = messageID.data(using: .utf8), messageIDData.count <= 255 else { return nil }
@@ -124,9 +128,15 @@ struct PrivateMessagePacket {
         data.append(messageIDData)
 
         // TLV for content
-        guard let contentData = content.data(using: .utf8), contentData.count <= 255 else { return nil }
-        data.append(TLVType.content.rawValue)
-        data.append(UInt8(contentData.count))
+        guard let contentData = content.data(using: .utf8), contentData.count <= 65535 else { return nil }
+        if contentData.count <= 255 {
+            data.append(TLVType.content.rawValue)
+            data.append(UInt8(contentData.count))
+        } else {
+            data.append(TLVType.content16.rawValue)
+            data.append(UInt8((contentData.count >> 8) & 0xFF))
+            data.append(UInt8(contentData.count & 0xFF))
+        }
         data.append(contentData)
 
         return data
@@ -141,8 +151,15 @@ struct PrivateMessagePacket {
             guard let type = TLVType(rawValue: data[offset]) else { return nil }
             offset += 1
 
-            let length = Int(data[offset])
-            offset += 1
+            let length: Int
+            if type == .content16 {
+                guard offset + 2 <= data.count else { return nil }
+                length = (Int(data[offset]) << 8) | Int(data[offset + 1])
+                offset += 2
+            } else {
+                length = Int(data[offset])
+                offset += 1
+            }
 
             guard offset + length <= data.count else { return nil }
             let value = data[offset..<offset + length]
@@ -151,7 +168,7 @@ struct PrivateMessagePacket {
             switch type {
             case .messageID:
                 messageID = String(data: value, encoding: .utf8)
-            case .content:
+            case .content, .content16:
                 content = String(data: value, encoding: .utf8)
             }
         }

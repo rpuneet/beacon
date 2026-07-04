@@ -273,6 +273,20 @@ private final class MockLocationManager: LocationStateManaging {
     func stopUpdatingLocation() {
         stopUpdatingLocationCallCount += 1
     }
+
+    #if os(iOS)
+    var headingFilter: CLLocationDegrees = 0
+    private(set) var startUpdatingHeadingCallCount = 0
+    private(set) var stopUpdatingHeadingCallCount = 0
+
+    func startUpdatingHeading() {
+        startUpdatingHeadingCallCount += 1
+    }
+
+    func stopUpdatingHeading() {
+        stopUpdatingHeadingCallCount += 1
+    }
+    #endif
 }
 
 private final class MockLocationGeocoder: LocationStateGeocoding {

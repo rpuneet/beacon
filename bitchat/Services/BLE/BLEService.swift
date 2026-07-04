@@ -43,7 +43,21 @@ final class BLEService: NSObject {
     
     // 3. Peer Information (single source of truth)
     private var peerRegistry = BLEPeerRegistry()
-    
+
+    // RSSI per peer (updated on didDiscover for connected peers)
+    private var peerRSSI: [PeerID: Int] = [:]
+
+    /// Get last known RSSI for a connected peer (for beacon feature)
+    func getRSSI(for peerID: PeerID) -> Int? {
+        collectionsQueue.sync { peerRSSI[peerID] }
+    }
+
+    /// Get all connected peers with their noise public keys (for beacon feature)
+    /// Returns tuples of (ephemeral peerID for messaging, noise public key for identity)
+    func getConnectedPeersWithNoiseKeys() -> [(peerID: PeerID, noiseKey: Data)] {
+        collectionsQueue.sync { peerRegistry.connectedPeersWithNoiseKeys() }
+    }
+
     // 4. Efficient Message Deduplication
     private let messageDeduplicator = MessageDeduplicator()
     private var selfBroadcastTracker = BLESelfBroadcastTracker()
@@ -1299,6 +1313,7 @@ extension BLEService: GossipSyncManager.Delegate {
             peerRegistry.connectedPeerIDs
         }
     }
+
 }
 
 // MARK: - CBCentralManagerDelegate
@@ -1431,6 +1446,13 @@ extension BLEService: CBCentralManagerDelegate {
             discoveredAt: Date()
         )
         let existingState = linkStateStore.state(forPeripheralID: peripheralID).map(BLEExistingConnectionState.init)
+
+        // Track RSSI for the beacon feature when the discovery maps to a known peer
+        if let peerID = linkStateStore.state(forPeripheralID: peripheralID)?.peerID {
+            collectionsQueue.async(flags: .barrier) { [weak self] in
+                self?.peerRSSI[peerID] = rssiValue
+            }
+        }
 
         switch connectionScheduler.handleDiscovery(
             candidate,
@@ -2602,7 +2624,7 @@ extension BLEService {
     
     private func sendPrivateMessage(_ content: String, to recipientID: PeerID, messageID: String) {
         SecureLogger.debug("📨 Sending PM to \(recipientID.id.prefix(8))… id=\(messageID.prefix(8))… chars=\(content.count) bytes=\(content.utf8.count)", category: .session)
-        
+
         // Check if we have an established Noise session
         if noiseService.hasEstablishedSession(with: recipientID) {
             // Encrypt and send
