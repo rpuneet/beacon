@@ -1043,6 +1043,10 @@ final class ChatViewModel: ObservableObject, BitchatDelegate, TransportEventDele
     @MainActor
     func updateBluetoothState(_ state: CBManagerState) {
         bluetoothState = state
+        #if DEBUG
+        // Screenshot automation: the simulator has no Bluetooth; keep the alert away
+        if ProcessInfo.processInfo.arguments.contains("-beacon.screenshotMode") { return }
+        #endif
         let alertUpdate = ChatBluetoothAlertPolicy.update(for: state)
         showBluetoothAlert = alertUpdate.isPresented
         if let message = alertUpdate.message {

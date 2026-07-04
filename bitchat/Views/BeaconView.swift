@@ -54,6 +54,12 @@ struct BeaconView: View {
         .frame(minWidth: 500, minHeight: 550)
         #endif
         .onAppear {
+            #if DEBUG
+            // Screenshot automation: -beacon.autoOpenSettings lands on the privacy sheet
+            if ProcessInfo.processInfo.arguments.contains("-beacon.autoOpenSettings") {
+                showSettings = true
+            }
+            #endif
             if let loc = locationManager.currentLocation {
                 mapRegion.center = loc.coordinate
             }
@@ -225,21 +231,33 @@ struct BeaconView: View {
                 #else
                 Map(coordinateRegion: $mapRegion, showsUserLocation: true, annotationItems: mapAnnotations) { item in
                     MapAnnotation(coordinate: item.coordinate) {
-                        Circle()
-                            .fill(item.transport == .ble ? Color.green : Color.purple)
-                            .frame(width: 24, height: 24)
-                            .overlay(
-                                Image(systemName: "person.fill")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.white)
-                            )
-                            .onTapGesture {
-                                if selectedFavoriteKey == item.noiseKey {
-                                    stopTracking()
-                                } else {
-                                    startTracking(item.noiseKey)
-                                }
+                        VStack(spacing: 4) {
+                            Circle()
+                                .fill(BeaconProfile.peerColor(nickname: item.nickname))
+                                .frame(width: 28, height: 28)
+                                .overlay(
+                                    Text(String(item.nickname.prefix(1)).uppercased())
+                                        .font(.bitchatSystem(size: 13, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.white)
+                                )
+                                .overlay(
+                                    Circle().stroke(item.transport == .ble ? Color.green : Color.purple, lineWidth: 2)
+                                )
+                            Text(item.nickname)
+                                .font(.bitchatSystem(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.black.opacity(0.65))
+                                .cornerRadius(8)
+                        }
+                        .onTapGesture {
+                            if selectedFavoriteKey == item.noiseKey {
+                                stopTracking()
+                            } else {
+                                startTracking(item.noiseKey)
                             }
+                        }
                     }
                 }
                 #endif

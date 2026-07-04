@@ -251,6 +251,10 @@ private extension ChatViewModelBootstrapper {
     }
 
     func requestNotifications() {
+        #if DEBUG
+        // Screenshot automation: keep system alerts out of the way
+        if ProcessInfo.processInfo.arguments.contains("-beacon.screenshotMode") { return }
+        #endif
         NotificationService.shared.requestAuthorization()
     }
 

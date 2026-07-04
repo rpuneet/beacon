@@ -107,6 +107,16 @@ struct CompassMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if annotation is MKUserLocation {
+                // Own avatar instead of the default blue dot
+                let identifier = "self-avatar"
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                    ?? MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                view.annotation = annotation
+                view.image = SelfAvatarRenderer.image()
+                view.centerOffset = .zero
+                return view
+            }
             guard let beacon = annotation as? BeaconPointAnnotation else { return nil }
             let view = mapView.dequeueReusableAnnotationView(withIdentifier: "beacon", for: annotation) as! BeaconAnnotationView
             view.configure(with: beacon)
@@ -135,34 +145,70 @@ class BeaconPointAnnotation: MKPointAnnotation {
     }
 }
 
+/// Peer pin: identity-colored bubble with the peer's initial, transport shown
+/// as a ring (green = direct BLE, purple = relay), and an always-visible
+/// monospace name chip beneath — usernames on the map, not behind a tap.
 class BeaconAnnotationView: MKAnnotationView {
+    private static let bubbleSize: CGFloat = 32
+    private let bubble = UILabel()
+    private let nameChip = UILabel()
+
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
-        self.canShowCallout = false
-        self.frame = CGRect(x: 0, y: 0, width: 40, height: 40)
+        canShowCallout = false
+        frame = CGRect(x: 0, y: 0, width: 88, height: 54)
+        // Bubble center sits on the coordinate; the name hangs below
+        centerOffset = CGPoint(x: 0, y: Self.bubbleSize / 2 - frame.height / 2)
+
+        bubble.frame = CGRect(x: (frame.width - Self.bubbleSize) / 2, y: 0, width: Self.bubbleSize, height: Self.bubbleSize)
+        bubble.textAlignment = .center
+        bubble.font = .monospacedSystemFont(ofSize: 15, weight: .bold)
+        bubble.textColor = .white
+        bubble.layer.cornerRadius = Self.bubbleSize / 2
+        bubble.layer.borderWidth = 2.5
+        bubble.clipsToBounds = true
+        addSubview(bubble)
+
+        nameChip.frame = CGRect(x: 0, y: Self.bubbleSize + 4, width: frame.width, height: 16)
+        nameChip.textAlignment = .center
+        nameChip.font = .monospacedSystemFont(ofSize: 10, weight: .semibold)
+        nameChip.textColor = .white
+        nameChip.backgroundColor = UIColor.black.withAlphaComponent(0.65)
+        nameChip.layer.cornerRadius = 8
+        nameChip.clipsToBounds = true
+        nameChip.lineBreakMode = .byTruncatingTail
+        addSubview(nameChip)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func configure(with annotation: BeaconPointAnnotation) {
-        let size: CGFloat = 32
-        UIGraphicsBeginImageContextWithOptions(CGSize(width: size, height: size), false, 0)
-        let ctx = UIGraphicsGetCurrentContext()!
+        let name = annotation.title ?? "?"
+        bubble.text = String(name.prefix(1)).uppercased()
+        bubble.backgroundColor = UIColor(BeaconProfile.peerColor(nickname: name))
+        bubble.layer.borderColor = (annotation.transport == .ble ? UIColor.systemGreen : UIColor.systemPurple).cgColor
+        nameChip.text = name
+    }
+}
 
-        let color = annotation.transport == .ble ? UIColor.systemGreen : UIColor.systemPurple
-        ctx.setFillColor(color.cgColor)
-        ctx.fillEllipse(in: CGRect(x: 0, y: 0, width: size, height: size))
-
-        let config = UIImage.SymbolConfiguration(pointSize: 14, weight: .bold)
-        if let icon = UIImage(systemName: "person.fill", withConfiguration: config)?.withTintColor(.white, renderingMode: .alwaysOriginal) {
-            let iconSize = icon.size
-            let iconRect = CGRect(x: (size - iconSize.width) / 2, y: (size - iconSize.height) / 2, width: iconSize.width, height: iconSize.height)
-            icon.draw(in: iconRect)
+/// Renders the local user's avatar (emoji on their chosen color) for the map.
+@MainActor
+enum SelfAvatarRenderer {
+    static func image() -> UIImage {
+        let size: CGFloat = 36
+        let profile = BeaconProfile.shared
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size))
+        return renderer.image { ctx in
+            UIColor(profile.avatarColor).setFill()
+            ctx.cgContext.fillEllipse(in: CGRect(x: 0, y: 0, width: size, height: size))
+            UIColor.white.setStroke()
+            ctx.cgContext.setLineWidth(2.5)
+            ctx.cgContext.strokeEllipse(in: CGRect(x: 1.25, y: 1.25, width: size - 2.5, height: size - 2.5))
+            let emoji = profile.avatarEmoji as NSString
+            let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 18)]
+            let textSize = emoji.size(withAttributes: attrs)
+            emoji.draw(at: CGPoint(x: (size - textSize.width) / 2, y: (size - textSize.height) / 2), withAttributes: attrs)
         }
-
-        self.image = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        self.centerOffset = CGPoint(x: 0, y: -size / 2)
     }
 }
 #endif

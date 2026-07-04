@@ -205,6 +205,14 @@ struct ContentHeaderView: View {
             .sheet(isPresented: $showBeaconSheet) {
                 BeaconView()
             }
+            .onAppear {
+                #if DEBUG
+                // Screenshot automation: launch with -beacon.autoOpen to land on the map
+                if ProcessInfo.processInfo.arguments.contains("-beacon.autoOpen") {
+                    showBeaconSheet = true
+                }
+                #endif
+            }
         }
         .frame(height: headerHeight)
         .padding(.horizontal, 12)
