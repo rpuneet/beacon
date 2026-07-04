@@ -1,5 +1,7 @@
+import BitFoundation
 import Foundation
 import Combine
+import CoreBluetooth
 
 /// Abstract transport interface used by ChatViewModel and services.
 /// BLEService implements this protocol; a future Nostr transport can too.
@@ -11,9 +13,27 @@ struct TransportPeerSnapshot: Equatable, Hashable {
     let lastSeen: Date
 }
 
+enum TransportEvent: @unchecked Sendable {
+    case messageReceived(BitchatMessage)
+    case publicMessageReceived(peerID: PeerID, nickname: String, content: String, timestamp: Date, messageID: String?)
+    case noisePayloadReceived(peerID: PeerID, type: NoisePayloadType, payload: Data, timestamp: Date)
+    case peerConnected(PeerID)
+    case peerDisconnected(PeerID)
+    case peerListUpdated([PeerID])
+    case peerSnapshotsUpdated([TransportPeerSnapshot])
+    case messageDeliveryStatusUpdated(messageID: String, status: DeliveryStatus)
+    case bluetoothStateUpdated(CBManagerState)
+}
+
+protocol TransportEventDelegate: AnyObject {
+    @MainActor func didReceiveTransportEvent(_ event: TransportEvent)
+}
+
 protocol Transport: AnyObject {
     // Event sink
     var delegate: BitchatDelegate? { get set }
+    // Typed event sink for transport-domain events. Prefer this over BitchatDelegate for new code.
+    var eventDelegate: TransportEventDelegate? { get set }
     // Peer events (preferred over publishers for UI)
     var peerEventsDelegate: TransportPeerEventsDelegate? { get set }
     
@@ -41,7 +61,27 @@ protocol Transport: AnyObject {
     func getFingerprint(for peerID: PeerID) -> String?
     func getNoiseSessionState(for peerID: PeerID) -> LazyHandshakeState
     func triggerHandshake(with peerID: PeerID)
-    func getNoiseService() -> NoiseEncryptionService
+
+    // Noise identity/session access. Narrow, purpose-named wrappers so the
+    // underlying NoiseEncryptionService (and its peer-binding/session
+    // orchestration) is never exposed outside the transport.
+    /// The remote static public key of the Noise session with `peerID`, if established.
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data?
+    /// Fingerprint of our own Noise static identity key.
+    func noiseIdentityFingerprint() -> String
+    /// Our Noise static public key (Curve25519 key agreement).
+    func noiseStaticPublicKeyData() -> Data
+    /// Our Noise signing public key (Ed25519).
+    func noiseSigningPublicKeyData() -> Data
+    /// Signs `data` with our Noise signing key.
+    func noiseSignData(_ data: Data) -> Data?
+    /// Verifies an Ed25519 `signature` over `data` against `publicKey`.
+    func noiseVerifySignature(_ signature: Data, for data: Data, publicKey: Data) -> Bool
+    /// Registers session-lifecycle callbacks (peer authenticated / handshake required).
+    func installNoiseSessionCallbacks(
+        onPeerAuthenticated: @escaping (PeerID, String) -> Void,
+        onHandshakeRequired: @escaping (PeerID) -> Void
+    )
 
     // Messaging
     func sendMessage(_ content: String, mentions: [String])
@@ -65,6 +105,19 @@ protocol Transport: AnyObject {
 }
 
 extension Transport {
+    // Noise identity hooks default to inert for transports that do not carry
+    // Noise sessions (e.g. NostrTransport).
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data? { nil }
+    func noiseIdentityFingerprint() -> String { "" }
+    func noiseStaticPublicKeyData() -> Data { Data() }
+    func noiseSigningPublicKeyData() -> Data { Data() }
+    func noiseSignData(_ data: Data) -> Data? { nil }
+    func noiseVerifySignature(_ signature: Data, for data: Data, publicKey: Data) -> Bool { false }
+    func installNoiseSessionCallbacks(
+        onPeerAuthenticated: @escaping (PeerID, String) -> Void,
+        onHandshakeRequired: @escaping (PeerID) -> Void
+    ) {}
+
     func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {}
     func sendVerifyResponse(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {}
     func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String) {}
@@ -81,6 +134,38 @@ extension Transport {
 
 protocol TransportPeerEventsDelegate: AnyObject {
     @MainActor func didUpdatePeerSnapshots(_ peers: [TransportPeerSnapshot])
+}
+
+extension BitchatDelegate {
+    @MainActor
+    func receiveTransportEvent(_ event: TransportEvent) {
+        switch event {
+        case .messageReceived(let message):
+            didReceiveMessage(message)
+        case let .publicMessageReceived(peerID, nickname, content, timestamp, messageID):
+            didReceivePublicMessage(
+                from: peerID,
+                nickname: nickname,
+                content: content,
+                timestamp: timestamp,
+                messageID: messageID
+            )
+        case let .noisePayloadReceived(peerID, type, payload, timestamp):
+            didReceiveNoisePayload(from: peerID, type: type, payload: payload, timestamp: timestamp)
+        case .peerConnected(let peerID):
+            didConnectToPeer(peerID)
+        case .peerDisconnected(let peerID):
+            didDisconnectFromPeer(peerID)
+        case .peerListUpdated(let peers):
+            didUpdatePeerList(peers)
+        case .peerSnapshotsUpdated:
+            break
+        case let .messageDeliveryStatusUpdated(messageID, status):
+            didUpdateMessageDeliveryStatus(messageID, status: status)
+        case .bluetoothStateUpdated(let state):
+            didUpdateBluetoothState(state)
+        }
+    }
 }
 
 extension BLEService: Transport {}

@@ -78,6 +78,7 @@
 ///
 
 import BitLogger
+import BitFoundation
 import Foundation
 import CryptoKit
 
@@ -321,6 +322,13 @@ final class NoiseCipherState {
                 throw NoiseError.replayDetected
             }
             
+            // The 4-byte nonce prefix has been stripped, so the remaining bytes
+            // must still hold at least the 16-byte Poly1305 tag. The up-front
+            // `ciphertext.count >= 16` guard is not sufficient here (it counts
+            // the nonce), and `prefix(count - 16)` would trap on a short payload.
+            guard actualCiphertext.count >= 16 else {
+                throw NoiseError.invalidCiphertext
+            }
             // Split ciphertext and tag
             encryptedData = actualCiphertext.prefix(actualCiphertext.count - 16)
             tag = actualCiphertext.suffix(16)
@@ -384,6 +392,16 @@ final class NoiseCipherState {
             replayWindow[i] = 0
         }
     }
+
+    #if DEBUG
+    func setNonceForTesting(_ nonce: UInt64) {
+        self.nonce = nonce
+    }
+
+    func extractNonceFromCiphertextPayloadForTesting(_ combinedPayload: Data) throws -> (nonce: UInt64, ciphertext: Data)? {
+        try extractNonceFromCiphertextPayload(combinedPayload)
+    }
+    #endif
 }
 
 // MARK: - Symmetric State
@@ -585,8 +603,9 @@ final class NoiseHandshakeState {
             break // No pre-message keys
         case .IK, .NK:
             if role == .initiator, let remoteStatic = remoteStaticPublic {
-                _ = symmetricState.getHandshakeHash()
                 symmetricState.mixHash(remoteStatic.rawRepresentation)
+            } else if role == .responder, let localStatic = localStaticPublic {
+                symmetricState.mixHash(localStatic.rawRepresentation)
             }
         }
     }
@@ -861,6 +880,20 @@ final class NoiseHandshakeState {
     func getHandshakeHash() -> Data {
         return symmetricState.getHandshakeHash()
     }
+
+    #if DEBUG
+    func performDHOperationForTesting(_ pattern: NoiseMessagePattern) throws {
+        try performDHOperation(pattern)
+    }
+
+    func setCurrentPatternForTesting(_ currentPattern: Int) {
+        self.currentPattern = currentPattern
+    }
+
+    func setRemoteEphemeralPublicKeyForTesting(_ key: Curve25519.KeyAgreement.PublicKey?) {
+        self.remoteEphemeralPublic = key
+    }
+    #endif
 }
 
 // MARK: - Pattern Extensions

@@ -8,6 +8,7 @@
 
 import Foundation
 import CryptoKit
+import BitFoundation
 @testable import bitchat
 
 final class TestHelpers {
@@ -135,6 +136,46 @@ enum TestError: Error {
     case timeout
     case unexpectedValue
     case testFailure(String)
+}
+
+// MARK: - Private chat seeding (ConversationStore migration)
+
+extension ChatViewModel {
+    /// Test-only replacement for the deleted `privateChats` setter: seeds a
+    /// peer's chat through the single-writer `ConversationStore` intents
+    /// (upsert keeps re-seeding with updated copies working the way the old
+    /// dictionary assignment did).
+    @MainActor
+    func seedPrivateChat(_ messages: [BitchatMessage], for peerID: PeerID) {
+        _ = conversations.conversation(for: .directPeer(peerID))
+        for message in messages {
+            conversations.upsertByID(message, in: .directPeer(peerID))
+        }
+    }
+
+    /// Test-only replacement for the deleted `messages` setter: seeds a
+    /// public channel's conversation through the single-writer
+    /// `ConversationStore` intents (upsert keeps re-seeding with updated
+    /// copies working the way the old array assignment did).
+    @MainActor
+    func seedPublicMessages(_ messages: [BitchatMessage], for channel: ChannelID = .mesh) {
+        for message in messages {
+            conversations.upsertByID(message, in: ConversationID(channelID: channel))
+        }
+    }
+
+    /// Test-only replacement for `messages.removeAll()`: empties a public
+    /// channel's conversation.
+    @MainActor
+    func clearPublicMessages(for channel: ChannelID = .mesh) {
+        conversations.clear(ConversationID(channelID: channel))
+    }
+
+    /// Test-only: drops every private chat and unread flag.
+    @MainActor
+    func clearAllPrivateChats() {
+        conversations.removeAllDirectConversations()
+    }
 }
 
 func sleep(_ seconds: TimeInterval) async throws {

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import BitFoundation
 @testable import bitchat
 
 struct NotificationStreamAssemblerTests {
@@ -94,6 +95,27 @@ struct NotificationStreamAssemblerTests {
 
         let decoded = try #require(BinaryProtocol.decode(result.frames[0]), "Failed to decode frame after drop")
         #expect(decoded.timestamp == packet.timestamp)
+    }
+
+    @Test func discardsPKCSPaddingBetweenNotificationFrames() throws {
+        var assembler = NotificationStreamAssembler()
+        let packet1 = makePacket(timestamp: 0x111)
+        let packet2 = makePacket(timestamp: 0x222)
+        let paddedFrame1 = try #require(packet1.toBinaryData(padding: true), "Failed to encode first padded packet")
+        let paddedFrame2 = try #require(packet2.toBinaryData(padding: true), "Failed to encode second padded packet")
+
+        var result = assembler.append(paddedFrame1)
+        #expect(result.frames.count == 1)
+        #expect(result.droppedPrefixes.isEmpty)
+        #expect(result.reset == false)
+
+        result = assembler.append(paddedFrame2)
+        #expect(result.frames.count == 1)
+        #expect(result.droppedPrefixes.isEmpty)
+        #expect(result.reset == false)
+
+        let decoded = try #require(BinaryProtocol.decode(result.frames[0]), "Failed to decode second frame")
+        #expect(decoded.timestamp == packet2.timestamp)
     }
 
     func testAssemblesCompressedLargeFrame() throws {

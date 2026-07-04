@@ -11,16 +11,21 @@ enum TransportConfig {
     static let bleMaxConcurrentTransfers: Int = 2           // Limit simultaneous large media sends
     static let bleFragmentRelayMinDelayMs: Int = 8          // Faster forwarding for media fragments
     static let bleFragmentRelayMaxDelayMs: Int = 25         // Upper jitter bound for fragment relays
-    static let bleFragmentRelayTtlCap: UInt8 = 5            // Clamp fragment TTL to contain floods
+    // Fragment relay TTL in sparse graphs; matches messageTTLDefault so media
+    // reaches as far as text. Dense graphs clamp harder in RelayController.
+    static let bleFragmentRelayTtlCap: UInt8 = 7
+    static let bleFragmentRelayTtlCapDense: UInt8 = 5       // Contain fragment floods in dense graphs
 
     // UI / Storage Caps
     static let privateChatCap: Int = 1337
     static let meshTimelineCap: Int = 1337
     static let geoTimelineCap: Int = 1337
     static let contentLRUCap: Int = 2000
+    static let geoSamplingEventLRUCap: Int = 2000
 
     // Timers
     static let networkResetGraceSeconds: TimeInterval = 600 // 10 minutes
+    static let networkNotificationCooldownSeconds: TimeInterval = 300 // 5 minutes
     static let basePublicFlushInterval: TimeInterval = 0.08  // ~12.5 fps batching
 
     // BLE duty/announce/connect
@@ -39,14 +44,27 @@ enum TransportConfig {
     static let blePendingNotificationsCapCount: Int = 128
     static let bleNotificationRetryDelayMs: Int = 25
     static let bleNotificationRetryMaxAttempts: Int = 80
+    // Sample interval for notification backpressure logs (fire per fragment
+    // during media transfers).
+    static let bleBackpressureLogInterval: Int = 25
 
     // Nostr
     static let nostrReadAckInterval: TimeInterval = 0.35 // ~3 per second
+    static let nostrInboundEventDedupCap: Int = 4096
+    static let nostrInboundEventDedupTrimTarget: Int = 3072
+    static let nostrDuplicateEventLogInterval: Int = 50
+    // Sample interval for per-event debug logs on the inbound hot path.
+    static let nostrInboundEventLogInterval: Int = 100
+
+    // Conversation store diagnostics (field observability)
+    // Sample interval for the periodic store-audit "OK" heartbeat line
+    // (first + every Nth audit); violations always log at error level.
+    static let conversationStoreAuditLogInterval: Int = 10
+    // Sample interval for the mirrored-republish debug line in the ID-only
+    // delivery fan-out (first + every Nth republish).
+    static let conversationStoreMirroredRepublishLogInterval: Int = 25
 
     // UI thresholds
-    static let uiLateInsertThreshold: TimeInterval = 15.0
-    // Geohash public chats are more sensitive to ordering; use a tighter threshold
-    static let uiLateInsertThresholdGeo: TimeInterval = 0.0
     static let uiProcessedNostrEventsCap: Int = 2000
     static let uiChannelInactivityThresholdSeconds: TimeInterval = 9 * 60
     
@@ -75,19 +93,21 @@ enum TransportConfig {
     // BLE maintenance & thresholds
     static let bleMaintenanceInterval: TimeInterval = 5.0
     static let bleMaintenanceLeewaySeconds: Int = 1
-    static let bleIsolationRelaxThresholdSeconds: TimeInterval = 60
-    static let bleRecentTimeoutWindowSeconds: TimeInterval = 60
-    static let bleRecentTimeoutCountThreshold: Int = 3
-    static let bleRSSIIsolatedBase: Int = -90
-    static let bleRSSIIsolatedRelaxed: Int = -92
+    static let bleIsolationRelaxThresholdSeconds: TimeInterval = 30
+    // Isolated nodes accept the weakest usable links — a fringe connection
+    // beats no connection. Relaxed floor sits at CoreBluetooth's practical
+    // reporting limit so prolonged isolation gates on nothing but decode.
+    static let bleRSSIIsolatedBase: Int = -95
+    static let bleRSSIIsolatedRelaxed: Int = -100
     static let bleRSSIConnectedThreshold: Int = -85
-    static let bleRSSIHighTimeoutThreshold: Int = -80
     // How long without seeing traffic before we sanity-check the direct link
     // Lowered to make connected→reachable icon changes react faster when walking out of range
     static let blePeerInactivityTimeoutSeconds: TimeInterval = 8.0
-    // How long to retain a peer as "reachable" (not directly connected) since lastSeen
-    static let bleReachabilityRetentionVerifiedSeconds: TimeInterval = 21.0    // 21s for verified/favorites
-    static let bleReachabilityRetentionUnverifiedSeconds: TimeInterval = 21.0  // 21s for unknown/unverified
+    // How long to retain a peer as "reachable" (not directly connected) since lastSeen.
+    // Must comfortably exceed the worst-case dense announce interval (38s) plus a
+    // missed cycle, so duty-cycled nodes don't forget peers between announces.
+    static let bleReachabilityRetentionVerifiedSeconds: TimeInterval = 60.0    // verified/favorites
+    static let bleReachabilityRetentionUnverifiedSeconds: TimeInterval = 45.0  // unknown/unverified
     static let bleFragmentLifetimeSeconds: TimeInterval = 30.0
     static let bleIngressRecordLifetimeSeconds: TimeInterval = 3.0
     static let bleConnectTimeoutBackoffWindowSeconds: TimeInterval = 120.0
@@ -132,9 +152,6 @@ enum TransportConfig {
     static let nostrShortKeyDisplayLength: Int = 8
     static let nostrConvKeyPrefixLength: Int = 16
 
-    // Compression
-    static let compressionThresholdBytes: Int = 100
-
     // Message deduplication
     static let messageDedupMaxAgeSeconds: TimeInterval = 300
     static let messageDedupMaxCount: Int = 1000
@@ -147,7 +164,27 @@ enum TransportConfig {
     static let nostrRelayMaxBackoffSeconds: TimeInterval = 300.0
     static let nostrRelayBackoffMultiplier: Double = 2.0
     static let nostrRelayMaxReconnectAttempts: Int = 10
+    // Reconnect delays get ±20% random jitter so relays that dropped together
+    // (e.g. a network blip) don't thundering-herd the same reconnect instant.
+    static let nostrRelayBackoffJitterRatio: Double = 0.2
     static let nostrRelayDefaultFetchLimit: Int = 100
+    // How many consecutive Tor-readiness waits (each bounded by TorManager's
+    // bootstrap deadline) to attempt before unblocking pending EOSE callers.
+    static let nostrTorReadyMaxWaitAttempts: Int = 3
+    static let nostrPendingSendQueueCap: Int = 200
+    // Sample interval for the send-queue overflow warning (first + every Nth
+    // dropped event). Drops are ephemeral presence/geo traffic — log-only.
+    static let nostrPendingSendDropLogInterval: Int = 10
+    // Pending (not-yet-flushed) REQs are bounded per relay: oldest-by-insertion
+    // eviction at the cap, plus an age sweep on connect attempts. Durable
+    // subscription intent survives in subscriptionRequestState either way.
+    static let nostrPendingSubscriptionsPerRelayCap: Int = 64
+    static let nostrPendingSubscriptionTTLSeconds: TimeInterval = 600.0
+    // Fallback deadline for treating a subscription's initial fetch as complete
+    // when a relay never sends EOSE (generous to cover Tor circuit setup).
+    static let nostrSubscriptionEOSEFallbackSeconds: TimeInterval = 10.0
+    // After this long, a relay marked permanently failed gets another chance.
+    static let nostrRelayFailureCooldownSeconds: TimeInterval = 600.0
 
     // Geo relay directory
     static let geoRelayFetchIntervalSeconds: TimeInterval = 60 * 60 * 24
@@ -171,8 +208,10 @@ enum TransportConfig {
     static let bleSubscriptionRateLimitWindowSeconds: TimeInterval = 60.0   // Window for tracking subscription attempts
     static let bleSubscriptionRateLimitMaxAttempts: Int = 5                 // Max attempts before extended cooldown
 
-    // Store-and-forward for directed packets at relays
-    static let bleDirectedSpoolWindowSeconds: TimeInterval = 15.0
+    // Store-and-forward for directed packets at relays. Spooled packets retry
+    // on each maintenance flush until the window lapses; a longer window lets
+    // brief link gaps (walking between rooms, reconnect churn) heal themselves.
+    static let bleDirectedSpoolWindowSeconds: TimeInterval = 60.0
 
     // Log/UI debounce windows
     // Shorter debounce so UI reacts faster while still suppressing duplicate callbacks
@@ -182,6 +221,12 @@ enum TransportConfig {
     // Weak-link cooldown after connection timeouts
     static let bleWeakLinkCooldownSeconds: TimeInterval = 30.0
     static let bleWeakLinkRSSICutoff: Int = -90
+    // Rediscovery ignore windows after a failed link, by failure kind:
+    // a connect attempt that timed out means the peer likely isn't reachable,
+    // so back off; a dropped established connection (walked out of range)
+    // usually returns, so only pause long enough for CoreBluetooth to settle.
+    static let bleTimeoutDiscoveryIgnoreSeconds: TimeInterval = 15.0
+    static let bleDisconnectDiscoveryIgnoreSeconds: TimeInterval = 3.0
 
     // Content hashing / formatting
     static let contentKeyPrefixLength: Int = 256

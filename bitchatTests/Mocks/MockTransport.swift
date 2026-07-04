@@ -9,6 +9,7 @@
 import Foundation
 import Combine
 import CoreBluetooth
+import BitFoundation
 @testable import bitchat
 
 /// Mock Transport implementation for testing ChatViewModel in isolation.
@@ -18,6 +19,7 @@ final class MockTransport: Transport {
     // MARK: - Protocol Properties
 
     weak var delegate: BitchatDelegate?
+    weak var eventDelegate: TransportEventDelegate?
     weak var peerEventsDelegate: TransportPeerEventsDelegate?
 
     var myPeerID: PeerID = PeerID(str: "TESTPEER")
@@ -35,6 +37,9 @@ final class MockTransport: Transport {
     private(set) var sentReadReceipts: [(receipt: ReadReceipt, peerID: PeerID)] = []
     private(set) var sentDeliveryAcks: [(messageID: String, peerID: PeerID)] = []
     private(set) var sentFavoriteNotifications: [(peerID: PeerID, isFavorite: Bool)] = []
+    private(set) var sentBroadcastFiles: [(packet: BitchatFilePacket, transferID: String)] = []
+    private(set) var sentPrivateFiles: [(packet: BitchatFilePacket, peerID: PeerID, transferID: String)] = []
+    private(set) var cancelledTransfers: [String] = []
     private(set) var sentVerifyChallenges: [(peerID: PeerID, noiseKeyHex: String, nonceA: Data)] = []
     private(set) var sentVerifyResponses: [(peerID: PeerID, noiseKeyHex: String, nonceA: Data)] = []
     private(set) var startServicesCallCount = 0
@@ -104,8 +109,34 @@ final class MockTransport: Transport {
         triggeredHandshakes.append(peerID)
     }
 
-    func getNoiseService() -> NoiseEncryptionService {
-        NoiseEncryptionService(keychain: mockKeychain)
+    // Noise identity wrappers backed by a mock-keychain encryption service
+    // (mirrors the previous `getNoiseService()` placeholder behavior: a real
+    // identity, but no peer sessions). Exposed so tests can assert against
+    // the same identity the wrappers use.
+    private(set) lazy var mockNoiseService = NoiseEncryptionService(keychain: mockKeychain)
+
+    func noiseSessionPublicKeyData(for peerID: PeerID) -> Data? {
+        mockNoiseService.getPeerPublicKeyData(peerID)
+    }
+
+    func noiseIdentityFingerprint() -> String {
+        mockNoiseService.getIdentityFingerprint()
+    }
+
+    func noiseStaticPublicKeyData() -> Data {
+        mockNoiseService.getStaticPublicKeyData()
+    }
+
+    func noiseSigningPublicKeyData() -> Data {
+        mockNoiseService.getSigningPublicKeyData()
+    }
+
+    func noiseSignData(_ data: Data) -> Data? {
+        mockNoiseService.signData(data)
+    }
+
+    func noiseVerifySignature(_ signature: Data, for data: Data, publicKey: Data) -> Bool {
+        mockNoiseService.verifySignature(signature, for: data, publicKey: publicKey)
     }
 
     // MARK: - Messaging
@@ -139,15 +170,15 @@ final class MockTransport: Transport {
     }
 
     func sendFileBroadcast(_ packet: BitchatFilePacket, transferId: String) {
-        // Not tracked for current tests
+        sentBroadcastFiles.append((packet, transferId))
     }
 
     func sendFilePrivate(_ packet: BitchatFilePacket, to peerID: PeerID, transferId: String) {
-        // Not tracked for current tests
+        sentPrivateFiles.append((packet, peerID, transferId))
     }
 
     func cancelTransfer(_ transferId: String) {
-        // Not tracked for current tests
+        cancelledTransfers.append(transferId)
     }
 
     func sendVerifyChallenge(to peerID: PeerID, noiseKeyHex: String, nonceA: Data) {
@@ -167,6 +198,9 @@ final class MockTransport: Transport {
         sentReadReceipts.removeAll()
         sentDeliveryAcks.removeAll()
         sentFavoriteNotifications.removeAll()
+        sentBroadcastFiles.removeAll()
+        sentPrivateFiles.removeAll()
+        cancelledTransfers.removeAll()
         sentVerifyChallenges.removeAll()
         sentVerifyResponses.removeAll()
         startServicesCallCount = 0

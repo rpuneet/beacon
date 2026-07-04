@@ -5,6 +5,79 @@ import Combine
 #if os(iOS) || os(macOS)
 import CoreLocation
 
+protocol LocationStateManaging: AnyObject {
+    var delegate: CLLocationManagerDelegate? { get set }
+    var desiredAccuracy: CLLocationAccuracy { get set }
+    var distanceFilter: CLLocationDistance { get set }
+    var authorizationStatus: CLAuthorizationStatus { get }
+    func requestWhenInUseAuthorization()
+    func requestLocation()
+    func startUpdatingLocation()
+    func stopUpdatingLocation()
+}
+
+protocol LocationStateGeocoding: AnyObject {
+    func cancelGeocode()
+    func reverseGeocodeLocation(
+        _ location: CLLocation,
+        completionHandler: @escaping ([CLPlacemark]?, Error?) -> Void
+    )
+}
+
+private final class CLLocationManagerAdapter: NSObject, LocationStateManaging {
+    private let base = CLLocationManager()
+
+    var delegate: CLLocationManagerDelegate? {
+        get { base.delegate }
+        set { base.delegate = newValue }
+    }
+
+    var desiredAccuracy: CLLocationAccuracy {
+        get { base.desiredAccuracy }
+        set { base.desiredAccuracy = newValue }
+    }
+
+    var distanceFilter: CLLocationDistance {
+        get { base.distanceFilter }
+        set { base.distanceFilter = newValue }
+    }
+
+    var authorizationStatus: CLAuthorizationStatus {
+        base.authorizationStatus
+    }
+
+    func requestWhenInUseAuthorization() {
+        base.requestWhenInUseAuthorization()
+    }
+
+    func requestLocation() {
+        base.requestLocation()
+    }
+
+    func startUpdatingLocation() {
+        base.startUpdatingLocation()
+    }
+
+    func stopUpdatingLocation() {
+        base.stopUpdatingLocation()
+    }
+}
+
+private final class CLGeocoderAdapter: LocationStateGeocoding {
+    private let base = CLGeocoder()
+
+    func cancelGeocode() {
+        base.cancelGeocode()
+    }
+
+    func reverseGeocodeLocation(
+        _ location: CLLocation,
+        completionHandler: @escaping ([CLPlacemark]?, Error?) -> Void
+    ) {
+        base.reverseGeocodeLocation(location, completionHandler: completionHandler)
+    }
+}
+
 /// Unified manager for location-based channel state including:
 /// - CoreLocation permissions and one-shot location retrieval
 /// - Geohash channel computation from coordinates
@@ -38,8 +111,8 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
 
     // MARK: - Private Properties (CoreLocation)
 
-    private let cl = CLLocationManager()
-    private let geocoder = CLGeocoder()
+    private let cl: LocationStateManaging
+    private let geocoder: LocationStateGeocoding
     private var lastLocation: CLLocation?
     private var lastLocationReceivedAt: Date?
     private var refreshTimer: Timer?
@@ -92,6 +165,8 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
 
     private override init() {
         self.storage = .standard
+        self.cl = CLLocationManagerAdapter()
+        self.geocoder = CLGeocoderAdapter()
         super.init()
 
         // Skip CoreLocation setup in test environments
@@ -111,8 +186,28 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     /// Internal initializer for testing with custom storage
     init(storage: UserDefaults) {
         self.storage = storage
+        self.cl = CLLocationManagerAdapter()
+        self.geocoder = CLGeocoderAdapter()
         super.init()
         loadPersistedState()
+    }
+
+    internal init(
+        storage: UserDefaults,
+        locationManager: LocationStateManaging,
+        geocoder: LocationStateGeocoding,
+        shouldInitializeCoreLocation: Bool
+    ) {
+        self.storage = storage
+        self.cl = locationManager
+        self.geocoder = geocoder
+        super.init()
+        loadPersistedState()
+        guard shouldInitializeCoreLocation else { return }
+        cl.delegate = self
+        cl.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        cl.distanceFilter = TransportConfig.locationDistanceFilterMeters
+        initializePermissionState()
     }
 
     private func loadPersistedState() {
@@ -151,12 +246,7 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     }
 
     private func initializePermissionState() {
-        let status: CLAuthorizationStatus
-        if #available(iOS 14.0, macOS 11.0, *) {
-            status = cl.authorizationStatus
-        } else {
-            status = CLLocationManager.authorizationStatus()
-        }
+        let status = cl.authorizationStatus
         updatePermissionState(from: status)
 
         // Fall back to persisted teleport state if no location authorization
@@ -175,12 +265,7 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
     // MARK: - Public API (Permissions & Location)
 
     func enableLocationChannels() {
-        let status: CLAuthorizationStatus
-        if #available(iOS 14.0, macOS 11.0, *) {
-            status = cl.authorizationStatus
-        } else {
-            status = CLLocationManager.authorizationStatus()
-        }
+        let status = cl.authorizationStatus
         switch status {
         case .notDetermined:
             cl.requestWhenInUseAuthorization()
@@ -625,10 +710,26 @@ final class LocationStateManager: NSObject, CLLocationManagerDelegate, Observabl
         }
     }
 
+    /// Removes all persisted location state and resets the in-memory view.
+    /// Used by the panic wipe — selected channel, teleport set and bookmarks
+    /// (which reveal where the user has been) must not survive on device.
+    func panicWipe() {
+        storage.removeObject(forKey: selectedChannelKey)
+        storage.removeObject(forKey: teleportedStoreKey)
+        storage.removeObject(forKey: bookmarksKey)
+        storage.removeObject(forKey: bookmarkNamesKey)
+        teleportedSet.removeAll()
+        bookmarkMembership.removeAll()
+        bookmarks = []
+        bookmarkNames = [:]
+        teleported = false
+        selectedChannel = .mesh
+    }
+
     private static func normalizeGeohash(_ s: String) -> String {
         let allowed = Set("0123456789bcdefghjkmnpqrstuvwxyz")
         return s
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmed
             .lowercased()
             .replacingOccurrences(of: "#", with: "")
             .filter { allowed.contains($0) }

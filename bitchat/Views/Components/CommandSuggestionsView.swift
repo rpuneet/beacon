@@ -8,61 +8,59 @@
 import SwiftUI
 
 struct CommandSuggestionsView: View {
-    @EnvironmentObject private var viewModel: ChatViewModel
-    @ObservedObject private var locationManager = LocationChannelManager.shared
-    
+    @EnvironmentObject private var privateConversationModel: PrivateConversationModel
+    @EnvironmentObject private var locationChannelsModel: LocationChannelsModel
+    @ThemedPalette private var palette
+
     @Binding var messageText: String
-    
-    let textColor: Color
-    let backgroundColor: Color
-    let secondaryTextColor: Color
-    
+
     private var filteredCommands: [CommandInfo] {
         guard messageText.hasPrefix("/") && !messageText.contains(" ") else { return [] }
-        let isGeoPublic = locationManager.selectedChannel.isLocation
-        let isGeoDM = viewModel.selectedPrivateChatPeer?.isGeoDM == true
+        let isGeoPublic = locationChannelsModel.selectedChannel.isLocation
+        let isGeoDM = privateConversationModel.selectedPeerID?.isGeoDM == true
         return CommandInfo.all(isGeoPublic: isGeoPublic, isGeoDM: isGeoDM).filter { command in
             command.alias.starts(with: messageText.lowercased())
         }
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(filteredCommands) { command in
-                Button {
-                    messageText = command.alias + " "
-                } label: {
-                    buttonRow(for: command)
+        // Render nothing when there are no matches: a zero-height view would
+        // still receive the composer VStack's spacing and push the input row
+        // off-center.
+        if !filteredCommands.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(filteredCommands) { command in
+                    Button {
+                        messageText = command.alias + " "
+                    } label: {
+                        buttonRow(for: command)
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.gray.opacity(0.1))
                 }
-                .buttonStyle(.plain)
-                .background(Color.gray.opacity(0.1))
             }
+            .themedOverlayPanel()
         }
-        .background(backgroundColor)
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(secondaryTextColor.opacity(0.3), lineWidth: 1)
-        )
     }
     
     private func buttonRow(for command: CommandInfo) -> some View {
         HStack {
             Text(command.alias)
-                .font(.bitchatSystem(size: 11, design: .monospaced))
-                .foregroundColor(textColor)
+                .bitchatFont(size: 11)
+                .foregroundColor(palette.primary)
                 .fontWeight(.medium)
-            
+
             if let placeholder = command.placeholder {
                 Text(placeholder)
-                    .font(.bitchatSystem(size: 10, design: .monospaced))
-                    .foregroundColor(secondaryTextColor.opacity(0.8))
+                    .bitchatFont(size: 10)
+                    .foregroundColor(palette.secondary.opacity(0.8))
             }
 
             Spacer()
-            
+
             Text(command.description)
-                .font(.bitchatSystem(size: 10, design: .monospaced))
-                .foregroundColor(secondaryTextColor)
+                .bitchatFont(size: 10)
+                .foregroundColor(palette.secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 3)
@@ -79,12 +77,13 @@ struct CommandSuggestionsView: View {
         idBridge: NostrIdentityBridge(),
         identityManager: SecureIdentityStateManager(keychain)
     )
-    
-    CommandSuggestionsView(
-        messageText: $messageText,
-        textColor: .green,
-        backgroundColor: .primary,
-        secondaryTextColor: .secondary
+    let privateConversationModel = PrivateConversationModel(
+        chatViewModel: viewModel,
+        conversations: viewModel.conversations
     )
-    .environmentObject(viewModel)
+    let locationChannelsModel = LocationChannelsModel()
+    
+    CommandSuggestionsView(messageText: $messageText)
+        .environmentObject(privateConversationModel)
+        .environmentObject(locationChannelsModel)
 }

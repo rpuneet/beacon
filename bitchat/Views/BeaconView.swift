@@ -9,7 +9,6 @@ import SwiftUI
 import MapKit
 
 struct BeaconView: View {
-    @EnvironmentObject var chatViewModel: ChatViewModel
     @ObservedObject private var beaconService = BeaconService.shared
     @ObservedObject private var favoritesService = FavoritesPersistenceService.shared
     @ObservedObject private var locationManager = LocationStateManager.shared

@@ -131,7 +131,7 @@ struct NostrFilterPresenceTests {
 @MainActor
 struct ChatViewModelPresenceHandlingTests {
 
-    @Test func handleNostrEvent_presenceUpdatesParticipantTracker() async {
+    @Test func handleNostrEvent_presenceUpdatesParticipantTracker() async throws {
         let (viewModel, _) = makeTestableViewModel()
         let geohash = "u4pruydq"
 
@@ -139,18 +139,18 @@ struct ChatViewModelPresenceHandlingTests {
         viewModel.switchLocationChannel(to: .location(GeohashChannel(level: .city, geohash: geohash)))
 
         // Create a presence event (kind 20001)
-        var event = NostrEvent(
-            pubkey: "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        let identity = try NostrIdentity.generate()
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex,
             createdAt: Date(),
             kind: .geohashPresence,
             tags: [["g", geohash]],
             content: ""
         )
-        event.id = "presence_evt_1"
-        event.sig = "sig"
+        let signed = try event.sign(with: identity.schnorrSigningKey())
 
         // Handle the event
-        viewModel.handleNostrEvent(event)
+        viewModel.handleNostrEvent(signed)
 
         // Allow async processing
         try? await Task.sleep(nanoseconds: 50_000_000)
@@ -160,7 +160,7 @@ struct ChatViewModelPresenceHandlingTests {
         #expect(count >= 1)
     }
 
-    @Test func handleNostrEvent_presenceDoesNotAddToTimeline() async {
+    @Test func handleNostrEvent_presenceDoesNotAddToTimeline() async throws {
         let (viewModel, _) = makeTestableViewModel()
         let geohash = "u4pruydq"
 
@@ -169,17 +169,17 @@ struct ChatViewModelPresenceHandlingTests {
         let initialMessageCount = viewModel.messages.count
 
         // Create a presence event (kind 20001)
-        var event = NostrEvent(
-            pubkey: "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        let identity = try NostrIdentity.generate()
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex,
             createdAt: Date(),
             kind: .geohashPresence,
             tags: [["g", geohash]],
             content: ""
         )
-        event.id = "presence_evt_2"
-        event.sig = "sig"
+        let signed = try event.sign(with: identity.schnorrSigningKey())
 
-        viewModel.handleNostrEvent(event)
+        viewModel.handleNostrEvent(signed)
 
         try? await Task.sleep(nanoseconds: 50_000_000)
 
@@ -187,24 +187,24 @@ struct ChatViewModelPresenceHandlingTests {
         #expect(viewModel.messages.count == initialMessageCount)
     }
 
-    @Test func handleNostrEvent_chatMessageUpdatesParticipant() async {
+    @Test func handleNostrEvent_chatMessageUpdatesParticipant() async throws {
         let (viewModel, _) = makeTestableViewModel()
         let geohash = "u4pruydq"
 
         viewModel.switchLocationChannel(to: .location(GeohashChannel(level: .city, geohash: geohash)))
 
         // Create a chat event (kind 20000) - NOT presence
-        var event = NostrEvent(
-            pubkey: "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        let identity = try NostrIdentity.generate()
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex,
             createdAt: Date(),
             kind: .ephemeralEvent,
             tags: [["g", geohash]],
             content: "Hello world"
         )
-        event.id = "chat_evt_1"
-        event.sig = "sig"
+        let signed = try event.sign(with: identity.schnorrSigningKey())
 
-        viewModel.handleNostrEvent(event)
+        viewModel.handleNostrEvent(signed)
 
         try? await Task.sleep(nanoseconds: 50_000_000)
 
@@ -223,25 +223,25 @@ struct ChatViewModelPresenceHandlingTests {
         #expect(chatKind == 20000)
     }
 
-    @Test func subscribeNostrEvent_acceptsPresenceKind() async {
+    @Test func subscribeNostrEvent_acceptsPresenceKind() async throws {
         let (viewModel, _) = makeTestableViewModel()
         let geohash = "u4pruydq"
 
         viewModel.switchLocationChannel(to: .location(GeohashChannel(level: .city, geohash: geohash)))
 
         // Create presence event
-        var event = NostrEvent(
-            pubkey: "test1234test1234test1234test1234test1234test1234test1234test1234",
+        let identity = try NostrIdentity.generate()
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex,
             createdAt: Date(),
             kind: .geohashPresence,
             tags: [["g", geohash]],
             content: ""
         )
-        event.id = "subscribe_presence_evt"
-        event.sig = "sig"
+        let signed = try event.sign(with: identity.schnorrSigningKey())
 
         // subscribeNostrEvent should accept kind 20001
-        viewModel.subscribeNostrEvent(event)
+        viewModel.subscribeNostrEvent(signed)
 
         try? await Task.sleep(nanoseconds: 50_000_000)
 
@@ -250,7 +250,7 @@ struct ChatViewModelPresenceHandlingTests {
         #expect(count >= 1)
     }
 
-    @Test func subscribeNostrEvent_presenceForNonActiveGeohash() async {
+    @Test func subscribeNostrEvent_presenceForNonActiveGeohash() async throws {
         let (viewModel, _) = makeTestableViewModel()
         let activeGeohash = "u4pruydq"
         let otherGeohash = "87yw7"
@@ -258,24 +258,93 @@ struct ChatViewModelPresenceHandlingTests {
         viewModel.switchLocationChannel(to: .location(GeohashChannel(level: .city, geohash: activeGeohash)))
 
         // Create presence event for a DIFFERENT geohash
-        var event = NostrEvent(
-            pubkey: "other1234other1234other1234other1234other1234other1234other1234",
+        let identity = try NostrIdentity.generate()
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex,
             createdAt: Date(),
             kind: .geohashPresence,
             tags: [["g", otherGeohash]],
             content: ""
         )
-        event.id = "other_geohash_presence"
-        event.sig = "sig"
+        let signed = try event.sign(with: identity.schnorrSigningKey())
 
         // Use subscribeNostrEvent with geohash parameter
-        viewModel.subscribeNostrEvent(event, gh: otherGeohash)
+        viewModel.subscribeNostrEvent(signed, gh: otherGeohash)
 
         try? await Task.sleep(nanoseconds: 50_000_000)
 
         // Should record for the other geohash
         let count = viewModel.geohashParticipantCount(for: otherGeohash)
         #expect(count >= 1)
+    }
+
+    @Test func subscribeNostrEvent_samplingDeduplicatesSameEventAcrossGeohashes() async throws {
+        let (viewModel, _) = makeTestableViewModel()
+        let firstGeohash = "u4pru"
+        let secondGeohash = "u4pruy"
+        let identity = try NostrIdentity.generate()
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex,
+            createdAt: Date(),
+            kind: .geohashPresence,
+            tags: [["g", secondGeohash]],
+            content: ""
+        )
+        let signed = try event.sign(with: identity.schnorrSigningKey())
+
+        viewModel.subscribeNostrEvent(signed, gh: firstGeohash)
+        viewModel.subscribeNostrEvent(signed, gh: secondGeohash)
+
+        #expect(viewModel.geohashParticipantCount(for: firstGeohash) == 1)
+        #expect(viewModel.geohashParticipantCount(for: secondGeohash) == 0)
+    }
+
+    @Test func subscribeNostrEvent_samplingDedupDoesNotBlockActiveChannelProcessing() async throws {
+        let (viewModel, _) = makeTestableViewModel()
+        let sampleGeohash = "u4pru"
+        let activeGeohash = "u4pruy"
+        let identity = try NostrIdentity.generate()
+
+        viewModel.switchLocationChannel(to: .location(GeohashChannel(level: .city, geohash: activeGeohash)))
+
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex,
+            createdAt: Date(),
+            kind: .geohashPresence,
+            tags: [["g", sampleGeohash]],
+            content: ""
+        )
+        let signed = try event.sign(with: identity.schnorrSigningKey())
+
+        viewModel.subscribeNostrEvent(signed, gh: sampleGeohash)
+        #expect(!viewModel.deduplicationService.hasProcessedNostrEvent(signed.id))
+
+        viewModel.subscribeNostrEvent(signed)
+
+        #expect(viewModel.geohashParticipantCount(for: sampleGeohash) == 1)
+        #expect(viewModel.deduplicationService.hasProcessedNostrEvent(signed.id))
+        #expect(viewModel.geohashParticipantCount(for: activeGeohash) >= 1)
+    }
+
+    @Test func subscribeNostrEvent_samplingInvalidSignatureDoesNotPoisonDedup() async throws {
+        let (viewModel, _) = makeTestableViewModel()
+        let sampleGeohash = "u4pru"
+        let identity = try NostrIdentity.generate()
+        let event = NostrEvent(
+            pubkey: identity.publicKeyHex,
+            createdAt: Date(),
+            kind: .geohashPresence,
+            tags: [["g", sampleGeohash]],
+            content: ""
+        )
+        let signed = try event.sign(with: identity.schnorrSigningKey())
+        var invalid = signed
+        invalid.sig = String(repeating: "0", count: 128)
+
+        viewModel.subscribeNostrEvent(invalid, gh: sampleGeohash)
+        viewModel.subscribeNostrEvent(signed, gh: sampleGeohash)
+
+        #expect(viewModel.geohashParticipantCount(for: sampleGeohash) == 1)
     }
 
     // MARK: - Test Helper

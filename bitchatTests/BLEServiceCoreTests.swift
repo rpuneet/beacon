@@ -8,25 +8,40 @@
 import Testing
 import Foundation
 import CoreBluetooth
+import BitFoundation
 @testable import bitchat
 
 struct BLEServiceCoreTests {
 
     @Test
-    func duplicatePacket_isDeduped() async {
+    func duplicatePacket_isDeduped() async throws {
         let ble = makeService()
         let delegate = PublicCaptureDelegate()
         ble.delegate = delegate
 
+        // Public messages must carry a valid signature from the claimed sender;
+        // sign the packet and preseed the sender's signing key so the receiver
+        // can verify it (production `sendMessage` signs public broadcasts too).
+        let signer = NoiseEncryptionService(keychain: MockKeychain())
         let sender = PeerID(str: "1122334455667788")
         let timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
-        let packet = makePublicPacket(content: "Hello", sender: sender, timestamp: timestamp)
+        let unsigned = makePublicPacket(content: "Hello", sender: sender, timestamp: timestamp)
+        let packet = try #require(signer.signPacket(unsigned), "Failed to sign public message")
+        let signingKey = signer.getSigningPublicKeyData()
 
-        ble._test_handlePacket(packet, fromPeerID: sender)
-        ble._test_handlePacket(packet, fromPeerID: sender)
+        ble._test_handlePacket(packet, fromPeerID: sender, signingPublicKey: signingKey)
+        let receivedFirst = await TestHelpers.waitUntil(
+            { delegate.publicMessagesSnapshot().count == 1 },
+            timeout: TestConstants.defaultTimeout
+        )
+        #expect(receivedFirst)
 
-        _ = await TestHelpers.waitUntil({ delegate.publicMessagesSnapshot().count == 1 },
-                                        timeout: TestConstants.shortTimeout)
+        ble._test_handlePacket(packet, fromPeerID: sender, signingPublicKey: signingKey)
+        let receivedDuplicate = await TestHelpers.waitUntil(
+            { delegate.publicMessagesSnapshot().count > 1 },
+            timeout: TestConstants.shortTimeout
+        )
+        #expect(!receivedDuplicate)
 
         let messages = delegate.publicMessagesSnapshot()
         #expect(messages.count == 1)
@@ -49,13 +64,170 @@ struct BLEServiceCoreTests {
         #expect(!didReceive)
         #expect(delegate.publicMessagesSnapshot().isEmpty)
     }
+
+    @Test
+    func announceSenderMismatch_isRejected() async throws {
+        let ble = makeService()
+
+        let signer = NoiseEncryptionService(keychain: MockKeychain())
+        let announcement = AnnouncementPacket(
+            nickname: "Spoof",
+            noisePublicKey: signer.getStaticPublicKeyData(),
+            signingPublicKey: signer.getSigningPublicKeyData(),
+            directNeighbors: nil
+        )
+        let payload = try #require(announcement.encode(), "Failed to encode announcement")
+
+        let derivedPeerID = PeerID(publicKey: announcement.noisePublicKey)
+        let wrongFirst = derivedPeerID.bare.first == "0" ? "1" : "0"
+        let wrongBare = String(wrongFirst) + String(derivedPeerID.bare.dropFirst())
+        let wrongPeerID = PeerID(str: wrongBare)
+        let packet = BitchatPacket(
+            type: MessageType.announce.rawValue,
+            senderID: Data(hexString: wrongPeerID.id) ?? Data(),
+            recipientID: nil,
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: payload,
+            signature: nil,
+            ttl: 7
+        )
+        let signed = try #require(signer.signPacket(packet), "Failed to sign announce packet")
+
+        ble._test_handlePacket(signed, fromPeerID: wrongPeerID, preseedPeer: false)
+
+        _ = await TestHelpers.waitUntil({ !ble.currentPeerSnapshots().isEmpty }, timeout: 0.3)
+        #expect(ble.currentPeerSnapshots().isEmpty)
+    }
+
+    @Test
+    func ingressAllowsRelayedSenderOnBoundLink() async throws {
+        let ble = makeService()
+        let boundPeer = PeerID(str: "1122334455667788")
+        let relayedSender = PeerID(str: "8899aabbccddeeff")
+        let packet = makePublicPacket(
+            content: "Relayed",
+            sender: relayedSender,
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+
+        #expect(ble._test_acceptsIngress(packet: packet, boundPeerID: boundPeer))
+    }
+
+    @Test
+    func ingressRejectsDirectAnnounceThatConflictsWithBoundLink() async throws {
+        let ble = makeService()
+        let boundPeer = PeerID(str: "1122334455667788")
+        let claimedPeer = PeerID(str: "8899aabbccddeeff")
+        let packet = BitchatPacket(
+            type: MessageType.announce.rawValue,
+            senderID: Data(hexString: claimedPeer.id) ?? Data(),
+            recipientID: nil,
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: Data(),
+            signature: nil,
+            ttl: 7
+        )
+
+        #expect(!ble._test_acceptsIngress(packet: packet, boundPeerID: boundPeer))
+    }
+
+    @Test
+    func ingressRejectsSelfLoopbackBeforeSpoofChecks() async throws {
+        let ble = makeService()
+        let packet = makePublicPacket(
+            content: "Loopback",
+            sender: ble.myPeerID,
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+
+        #expect(!ble._test_acceptsIngress(packet: packet, boundPeerID: PeerID(str: "1122334455667788")))
+    }
+
+    @Test
+    func ingressAllowsSelfAuthoredRSRWithTTLZeroFromBoundPeer() async throws {
+        let ble = makeService()
+        var packet = makePublicPacket(
+            content: "Recovered by sync",
+            sender: ble.myPeerID,
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+        packet.isRSR = true
+        packet.ttl = 0
+
+        #expect(ble._test_acceptsIngress(packet: packet, boundPeerID: PeerID(str: "1122334455667788")))
+    }
+
+    @Test
+    func ingressRecordSuppressesSecondLinkDuplicate() async throws {
+        let ble = makeService()
+        let packet = makePublicPacket(
+            content: "Duplicate link copy",
+            sender: PeerID(str: "1122334455667788"),
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+
+        #expect(ble._test_recordIngressIfNew(packet: packet, linkID: "central-a"))
+        #expect(!ble._test_recordIngressIfNew(packet: packet, linkID: "central-b"))
+    }
+
+    @Test
+    func panicReset_rotatesPeerIDDerivedFromNewNoiseFingerprint() async throws {
+        let ble = makeService()
+        let originalPeerID = ble.myPeerID
+        let originalFingerprint = ble.noiseIdentityFingerprint()
+        #expect(originalPeerID == PeerID(str: originalFingerprint.prefix(16)))
+
+        ble.resetIdentityForPanic(currentNickname: "anon")
+
+        // The Noise identity is regenerated and the peer ID swaps with it
+        // (atomically, behind a messageQueue barrier).
+        let newFingerprint = ble.noiseIdentityFingerprint()
+        #expect(newFingerprint != originalFingerprint)
+        #expect(ble.myPeerID != originalPeerID)
+        #expect(ble.myPeerID == PeerID(str: newFingerprint.prefix(16)))
+    }
+
+    @Test
+    func modifiedServices_rediscoverWhenBitChatServiceIsInvalidated() async throws {
+        let otherService = CBUUID(string: "0000180F-0000-1000-8000-00805F9B34FB")
+
+        #expect(BLEService._test_shouldRediscoverBitChatService(
+            invalidatedServiceUUIDs: [BLEService.serviceUUID],
+            cachedServiceUUIDs: [otherService]
+        ))
+    }
+
+    @Test
+    func modifiedServices_rediscoverWhenCachedServicesNoLongerIncludeBitChat() async throws {
+        let otherService = CBUUID(string: "0000180F-0000-1000-8000-00805F9B34FB")
+
+        #expect(BLEService._test_shouldRediscoverBitChatService(
+            invalidatedServiceUUIDs: [otherService],
+            cachedServiceUUIDs: [otherService]
+        ))
+    }
+
+    @Test
+    func modifiedServices_ignoreUnrelatedInvalidationWhenBitChatIsStillCached() async throws {
+        let otherService = CBUUID(string: "0000180F-0000-1000-8000-00805F9B34FB")
+
+        #expect(!BLEService._test_shouldRediscoverBitChatService(
+            invalidatedServiceUUIDs: [otherService],
+            cachedServiceUUIDs: [BLEService.serviceUUID, otherService]
+        ))
+    }
 }
 
 private func makeService() -> BLEService {
     let keychain = MockKeychain()
     let identityManager = MockIdentityManager(keychain)
     let idBridge = NostrIdentityBridge(keychain: MockKeychainHelper())
-    return BLEService(keychain: keychain, idBridge: idBridge, identityManager: identityManager)
+    return BLEService(
+        keychain: keychain,
+        idBridge: idBridge,
+        identityManager: identityManager,
+        initializeBluetoothManagers: false
+    )
 }
 
 private func makePublicPacket(content: String, sender: PeerID, timestamp: UInt64) -> BitchatPacket {

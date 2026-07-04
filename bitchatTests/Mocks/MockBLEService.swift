@@ -8,6 +8,7 @@
 
 import Foundation
 import CoreBluetooth
+@testable import BitFoundation // to avoid unnecessary public's
 @testable import bitchat
 
 /// In-memory BLE test harness used by E2E/Integration tests.
@@ -33,9 +34,7 @@ final class MockBLEService: NSObject {
     weak var delegate: BitchatDelegate?
     var myPeerID = PeerID(str: "MOCK1234")
     var myNickname: String = "MockUser"
-    
-    private let mockKeychain = MockKeychain()
-    
+
     // Test-specific properties
     var sentMessages: [(message: BitchatMessage, packet: BitchatPacket)] = []
     var sentPackets: [BitchatPacket] = []
@@ -108,6 +107,11 @@ final class MockBLEService: NSObject {
     func getPeers() -> [PeerID: String] {
         return getPeerNicknames()
     }
+
+    /// Keep local echo synchronous so Swift Testing confirmations observe it deterministically.
+    private func deliverLocalEcho(_ message: BitchatMessage) {
+        delegate?.didReceiveMessage(message)
+    }
     
     func sendMessage(_ content: String, mentions: [String] = [], to recipientID: String? = nil, messageID: String? = nil, timestamp: Date? = nil) {
         let message = BitchatMessage(
@@ -137,10 +141,7 @@ final class MockBLEService: NSObject {
             sentMessages.append((message, packet))
             sentPackets.append(packet)
             
-            // Simulate local echo
-            DispatchQueue.main.async { [weak self] in
-                self?.delegate?.didReceiveMessage(message)
-            }
+            deliverLocalEcho(message)
             
             // Surface raw packet to tests that intercept/relay/encrypt
             packetDeliveryHandler?(packet)
@@ -190,10 +191,7 @@ final class MockBLEService: NSObject {
             sentMessages.append((message, packet))
             sentPackets.append(packet)
             
-            // Simulate local echo
-            DispatchQueue.main.async { [weak self] in
-                self?.delegate?.didReceiveMessage(message)
-            }
+            deliverLocalEcho(message)
             
             // Surface raw packet to tests that intercept/relay/encrypt
             packetDeliveryHandler?(packet)
@@ -238,10 +236,6 @@ final class MockBLEService: NSObject {
     func emergencyDisconnectAll() {
         connectedPeers.removeAll()
         delegate?.didUpdatePeerList([])
-    }
-    
-    func getNoiseService() -> NoiseEncryptionService {
-        return NoiseEncryptionService(keychain: mockKeychain)
     }
     
     func getFingerprint(for peerID: String) -> String? {

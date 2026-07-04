@@ -1,9 +1,36 @@
 import BitLogger
+import BitFoundation
 import Foundation
 import Combine
 
 // Minimal Nostr transport conforming to Transport for offline sending
 final class NostrTransport: Transport, @unchecked Sendable {
+    struct Dependencies {
+        let notificationCenter: NotificationCenter
+        let loadFavorites: @MainActor () -> [Data: FavoritesPersistenceService.FavoriteRelationship]
+        let favoriteStatusForNoiseKey: @MainActor (Data) -> FavoritesPersistenceService.FavoriteRelationship?
+        let favoriteStatusForPeerID: @MainActor (PeerID) -> FavoritesPersistenceService.FavoriteRelationship?
+        let currentIdentity: @MainActor () throws -> NostrIdentity?
+        let registerPendingGiftWrap: @MainActor (String) -> Void
+        let sendEvent: @MainActor (NostrEvent) -> Void
+        let scheduleAfter: @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
+
+        static func live(idBridge: NostrIdentityBridge) -> Dependencies {
+            Dependencies(
+                notificationCenter: .default,
+                loadFavorites: { FavoritesPersistenceService.shared.favorites },
+                favoriteStatusForNoiseKey: { FavoritesPersistenceService.shared.getFavoriteStatus(for: $0) },
+                favoriteStatusForPeerID: { FavoritesPersistenceService.shared.getFavoriteStatus(forPeerID: $0) },
+                currentIdentity: { try idBridge.getCurrentNostrIdentity() },
+                registerPendingGiftWrap: { NostrRelayManager.registerPendingGiftWrap(id: $0) },
+                sendEvent: { NostrRelayManager.shared.sendEvent($0) },
+                scheduleAfter: { delay, action in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+                }
+            )
+        }
+    }
+
     // Provide BLE short peer ID for BitChat embedding
     var senderPeerID = PeerID(str: "")
 
@@ -17,20 +44,27 @@ final class NostrTransport: Transport, @unchecked Sendable {
     private let readAckInterval: TimeInterval = TransportConfig.nostrReadAckInterval
     private let keychain: KeychainManagerProtocol
     private let idBridge: NostrIdentityBridge
+    private let dependencies: Dependencies
+    private var favoriteStatusObserver: NSObjectProtocol?
 
     // Reachability Cache (thread-safe)
     private var reachablePeers: Set<PeerID> = []
     private let queue = DispatchQueue(label: "nostr.transport.state", attributes: .concurrent)
 
     @MainActor
-    init(keychain: KeychainManagerProtocol, idBridge: NostrIdentityBridge) {
+    init(
+        keychain: KeychainManagerProtocol,
+        idBridge: NostrIdentityBridge,
+        dependencies: Dependencies? = nil
+    ) {
         self.keychain = keychain
         self.idBridge = idBridge
+        self.dependencies = dependencies ?? .live(idBridge: idBridge)
         
         setupObservers()
         
         // Synchronously warm the cache to avoid startup race
-        let favorites = FavoritesPersistenceService.shared.favorites
+        let favorites = self.dependencies.loadFavorites()
         let reachable = favorites.values
             .filter { $0.peerNostrPublicKey != nil }
             .map { PeerID(publicKey: $0.peerNoisePublicKey) }
@@ -40,8 +74,14 @@ final class NostrTransport: Transport, @unchecked Sendable {
         }
     }
 
+    deinit {
+        if let favoriteStatusObserver {
+            dependencies.notificationCenter.removeObserver(favoriteStatusObserver)
+        }
+    }
+
     private func setupObservers() {
-        NotificationCenter.default.addObserver(
+        favoriteStatusObserver = dependencies.notificationCenter.addObserver(
             forName: .favoriteStatusChanged,
             object: nil,
             queue: nil
@@ -52,7 +92,7 @@ final class NostrTransport: Transport, @unchecked Sendable {
 
     private func refreshReachablePeers() {
         Task { @MainActor in
-            let favorites = FavoritesPersistenceService.shared.favorites
+            let favorites = dependencies.loadFavorites()
             let reachable = favorites.values
                 .filter { $0.peerNostrPublicKey != nil }
                 .map { PeerID(publicKey: $0.peerNoisePublicKey) }
@@ -66,6 +106,7 @@ final class NostrTransport: Transport, @unchecked Sendable {
     // MARK: - Transport Protocol Conformance
 
     weak var delegate: BitchatDelegate?
+    weak var eventDelegate: TransportEventDelegate?
     weak var peerEventsDelegate: TransportPeerEventsDelegate?
 
     var peerSnapshotPublisher: AnyPublisher<[TransportPeerSnapshot], Never> {
@@ -101,17 +142,9 @@ final class NostrTransport: Transport, @unchecked Sendable {
     func getFingerprint(for peerID: PeerID) -> String? { nil }
     func getNoiseSessionState(for peerID: PeerID) -> LazyHandshakeState { .none }
     func triggerHandshake(with peerID: PeerID) { /* no-op */ }
-    
-    // Nostr does not use Noise sessions here; return a cached placeholder to avoid reallocation
-    private static var cachedNoiseService: NoiseEncryptionService?
-    func getNoiseService() -> NoiseEncryptionService {
-        if let noiseService = Self.cachedNoiseService {
-            return noiseService
-        }
-        let noiseService = NoiseEncryptionService(keychain: keychain)
-        Self.cachedNoiseService = noiseService
-        return noiseService
-    }
+
+    // Nostr does not use Noise sessions here; the inert Transport defaults
+    // for the noise* identity hooks apply.
 
     // Public broadcast not supported over Nostr here
     func sendMessage(_ content: String, mentions: [String]) { /* no-op */ }
@@ -120,7 +153,7 @@ final class NostrTransport: Transport, @unchecked Sendable {
         Task { @MainActor in
             guard let recipientNpub = resolveRecipientNpub(for: peerID),
                   let recipientHex = npubToHex(recipientNpub),
-                  let senderIdentity = try? idBridge.getCurrentNostrIdentity() else { return }
+                  let senderIdentity = try? dependencies.currentIdentity() else { return }
             SecureLogger.debug("NostrTransport: preparing PM to \(recipientNpub.prefix(16))… id=\(messageID.prefix(8))…", category: .session)
             guard let embedded = NostrEmbeddedBitChat.encodePMForNostr(content: content, messageID: messageID, recipientPeerID: peerID, senderPeerID: senderPeerID) else {
                 SecureLogger.error("NostrTransport: failed to embed PM packet", category: .session)
@@ -133,9 +166,9 @@ final class NostrTransport: Transport, @unchecked Sendable {
     func sendReadReceipt(_ receipt: ReadReceipt, to peerID: PeerID) {
         // Enqueue and process with throttling to avoid relay rate limits
         // Use barrier to synchronize access to readQueue
-        queue.async(flags: .barrier) { [weak self] in
-            self?.readQueue.append(QueuedRead(receipt: receipt, peerID: peerID))
-            self?.processReadQueueIfNeeded()
+        queue.async(flags: .barrier) {
+            self.readQueue.append(QueuedRead(receipt: receipt, peerID: peerID))
+            self.processReadQueueIfNeeded()
         }
     }
 
@@ -143,7 +176,7 @@ final class NostrTransport: Transport, @unchecked Sendable {
         Task { @MainActor in
             guard let recipientNpub = resolveRecipientNpub(for: peerID),
                   let recipientHex = npubToHex(recipientNpub),
-                  let senderIdentity = try? idBridge.getCurrentNostrIdentity() else { return }
+                  let senderIdentity = try? dependencies.currentIdentity() else { return }
             let content = isFavorite ? "[FAVORITED]:\(senderIdentity.npub)" : "[UNFAVORITED]:\(senderIdentity.npub)"
             SecureLogger.debug("NostrTransport: preparing FAVORITE(\(isFavorite)) to \(recipientNpub.prefix(16))…", category: .session)
             guard let embedded = NostrEmbeddedBitChat.encodePMForNostr(content: content, messageID: UUID().uuidString, recipientPeerID: peerID, senderPeerID: senderPeerID) else {
@@ -159,7 +192,7 @@ final class NostrTransport: Transport, @unchecked Sendable {
         Task { @MainActor in
             guard let recipientNpub = resolveRecipientNpub(for: peerID),
                   let recipientHex = npubToHex(recipientNpub),
-                  let senderIdentity = try? idBridge.getCurrentNostrIdentity() else { return }
+                  let senderIdentity = try? dependencies.currentIdentity() else { return }
             SecureLogger.debug("NostrTransport: preparing DELIVERED ack id=\(messageID.prefix(8))…", category: .session)
             guard let ack = NostrEmbeddedBitChat.encodeAckForNostr(type: .delivered, messageID: messageID, recipientPeerID: peerID, senderPeerID: senderPeerID) else {
                 SecureLogger.error("NostrTransport: failed to embed DELIVERED ack", category: .session)
@@ -229,9 +262,9 @@ extension NostrTransport {
             return
         }
         if registerPending {
-            NostrRelayManager.registerPendingGiftWrap(id: event.id)
+            dependencies.registerPendingGiftWrap(event.id)
         }
-        NostrRelayManager.shared.sendEvent(event)
+        dependencies.sendEvent(event)
     }
 
     /// Must be called within a barrier on `queue`
@@ -249,7 +282,7 @@ extension NostrTransport {
             defer { scheduleNextReadAck() }
             guard let recipientNpub = resolveRecipientNpub(for: item.peerID),
                   let recipientHex = npubToHex(recipientNpub),
-                  let senderIdentity = try? idBridge.getCurrentNostrIdentity() else { return }
+                  let senderIdentity = try? dependencies.currentIdentity() else { return }
             SecureLogger.debug("NostrTransport: preparing READ ack id=\(item.receipt.originalMessageID.prefix(8))…", category: .session)
             guard let ack = NostrEmbeddedBitChat.encodeAckForNostr(type: .readReceipt, messageID: item.receipt.originalMessageID, recipientPeerID: item.peerID, senderPeerID: senderPeerID) else {
                 SecureLogger.error("NostrTransport: failed to embed READ ack", category: .session)
@@ -260,7 +293,7 @@ extension NostrTransport {
     }
 
     private func scheduleNextReadAck() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + readAckInterval) { [weak self] in
+        dependencies.scheduleAfter(readAckInterval) { [weak self] in
             self?.queue.async(flags: .barrier) { [weak self] in
                 self?.isSendingReadAcks = false
                 self?.processReadQueueIfNeeded()
@@ -271,12 +304,12 @@ extension NostrTransport {
     @MainActor
     private func resolveRecipientNpub(for peerID: PeerID) -> String? {
         if let noiseKey = Data(hexString: peerID.id),
-           let fav = FavoritesPersistenceService.shared.getFavoriteStatus(for: noiseKey),
+           let fav = dependencies.favoriteStatusForNoiseKey(noiseKey),
            let npub = fav.peerNostrPublicKey {
             return npub
         }
         if peerID.id.count == 16,
-           let fav = FavoritesPersistenceService.shared.getFavoriteStatus(forPeerID: peerID),
+           let fav = dependencies.favoriteStatusForPeerID(peerID),
            let npub = fav.peerNostrPublicKey {
             return npub
         }

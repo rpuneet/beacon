@@ -1,4 +1,5 @@
 import BitLogger
+import BitFoundation
 import Foundation
 import Combine
 
@@ -33,7 +34,23 @@ final class FavoritesPersistenceService: ObservableObject {
     
     static let shared = FavoritesPersistenceService()
 
-    init(keychain: KeychainManagerProtocol = KeychainManager()) {
+    /// Default keychain for the `shared` singleton. Under test this is an
+    /// in-memory keychain so touching `shared` never blocks on securityd
+    /// (`SecItemCopyMatching` can hang in test environments) and never reads
+    /// or writes the developer's real keychain. Production behavior is
+    /// unchanged. Tests that need their own instance keep injecting a mock
+    /// via `init(keychain:)`.
+    private nonisolated static func makeDefaultKeychain() -> KeychainManagerProtocol {
+        // PreviewKeychainManager lives in _PreviewHelpers, a development
+        // asset excluded from archive builds — release code must not
+        // reference it. Tests always run Debug, so the guard is lossless.
+        #if DEBUG
+        if TestEnvironment.isRunningTests { return PreviewKeychainManager() }
+        #endif
+        return KeychainManager()
+    }
+
+    init(keychain: KeychainManagerProtocol = FavoritesPersistenceService.makeDefaultKeychain()) {
         self.keychain = keychain
         loadFavorites()
         
