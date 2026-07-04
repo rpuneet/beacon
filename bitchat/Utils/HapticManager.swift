@@ -2,7 +2,7 @@
 // HapticManager.swift
 // bitchat
 //
-// Centralized haptic feedback manager for consistent tactile UX
+// Centralized haptic feedback for the beacon feature (no-op on macOS)
 //
 
 import Foundation
@@ -10,7 +10,6 @@ import Foundation
 import UIKit
 #endif
 
-/// Centralized manager for haptic feedback throughout the app
 final class HapticManager {
     static let shared = HapticManager()
 
@@ -19,7 +18,6 @@ final class HapticManager {
     private let impactMedium = UIImpactFeedbackGenerator(style: .medium)
     private let impactHeavy = UIImpactFeedbackGenerator(style: .heavy)
     private let notificationFeedback = UINotificationFeedbackGenerator()
-    private let selectionFeedback = UISelectionFeedbackGenerator()
     #endif
 
     private init() {
@@ -29,100 +27,35 @@ final class HapticManager {
         impactMedium.prepare()
         impactHeavy.prepare()
         notificationFeedback.prepare()
-        selectionFeedback.prepare()
         #endif
     }
 
-    // MARK: - Ping Haptics
-
-    /// Haptic feedback when ping is initiated
+    /// Haptic when a peer pings us ("ping → they vibrate")
     func pingStarted() {
         #if os(iOS)
         impactMedium.impactOccurred(intensity: 1.0)
         #endif
     }
 
-    /// Haptic feedback when a ping response is received
+    /// Haptic when a ping response is received
     func pingResponseReceived() {
         #if os(iOS)
         impactLight.impactOccurred(intensity: 0.6)
         #endif
     }
 
-    /// Haptic feedback when ping completes
-    /// - Parameter responseCount: Number of peers that responded
-    func pingCompleted(responseCount: Int) {
-        #if os(iOS)
-        if responseCount > 0 {
-            notificationFeedback.notificationOccurred(.success)
-        } else {
-            notificationFeedback.notificationOccurred(.warning)
-        }
-        #endif
-    }
-
-    // MARK: - Hot/Cold Haptics
-
-    /// Haptic feedback when getting closer to peer (warmer)
-    func warmer() {
-        #if os(iOS)
-        impactMedium.impactOccurred(intensity: 0.8)
-        #endif
-    }
-
-    /// Haptic feedback when getting farther from peer (colder)
-    func colder() {
-        #if os(iOS)
-        // Double-pulse for "cold" feedback
-        impactLight.impactOccurred(intensity: 0.4)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.impactLight.impactOccurred(intensity: 0.4)
-        }
-        #endif
-    }
-
-    // MARK: - General Haptics
-
-    /// Light impact for general UI interactions
-    func lightImpact() {
-        #if os(iOS)
-        impactLight.impactOccurred()
-        #endif
-    }
-
-    /// Medium impact for more significant interactions
-    func mediumImpact() {
-        #if os(iOS)
-        impactMedium.impactOccurred()
-        #endif
-    }
-
-    /// Heavy impact for major actions
-    func heavyImpact() {
-        #if os(iOS)
-        impactHeavy.impactOccurred()
-        #endif
-    }
-
-    /// Selection feedback for picker/toggle changes
-    func selection() {
-        #if os(iOS)
-        selectionFeedback.selectionChanged()
-        #endif
-    }
-
-    /// Success notification
+    /// Success notification (Found! celebration, arrival)
     func success() {
         #if os(iOS)
         notificationFeedback.notificationOccurred(.success)
         #endif
     }
 
-    /// Generic impact feedback with intensity level
     enum ImpactStyle {
         case light, medium, heavy
     }
 
+    /// Impact feedback for proximity-level changes
     func impact(_ style: ImpactStyle) {
         #if os(iOS)
         switch style {
@@ -130,20 +63,6 @@ final class HapticManager {
         case .medium: impactMedium.impactOccurred()
         case .heavy: impactHeavy.impactOccurred()
         }
-        #endif
-    }
-
-    /// Warning notification
-    func warning() {
-        #if os(iOS)
-        notificationFeedback.notificationOccurred(.warning)
-        #endif
-    }
-
-    /// Error notification
-    func error() {
-        #if os(iOS)
-        notificationFeedback.notificationOccurred(.error)
         #endif
     }
 }

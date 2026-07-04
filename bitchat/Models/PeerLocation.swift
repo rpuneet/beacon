@@ -5,35 +5,29 @@
 // Data model for peer location information from beacon pings
 //
 
-import BitFoundation
 import Foundation
 import CoreLocation
 import simd
 
-// MARK: - Peer Location
-
-/// Represents a peer's location and connection information from a beacon ping response
+/// A peer's last known location and signal data from a beacon PING/PONG
 struct PeerLocation: Identifiable, Equatable {
-    let id: String  // PeerID.id
-    let peerIDString: String
+    /// Short PeerID derived from the peer's Noise public key
+    let id: String
 
     // MARK: - GPS Data
     let latitude: Double?
     let longitude: Double?
     let altitude: Double?
     let horizontalAccuracy: Double?
-    let gpsEnabled: Bool
 
     // MARK: - Signal Data
     let transport: TransportType
     let pingMs: Int  // Round-trip time
     let peerRSSI: Int?  // RSSI that peer sees for us
 
-    // MARK: - UWB Data
-    let uwbSupported: Bool
-    let uwbToken: Data?
-    var uwbDistance: Float?  // Updated by UWBTrackingManager
-    // UWB direction stored as components (simd_float3 not Codable)
+    // MARK: - Live UWB Ranging (updated from UWBTrackingManager)
+    var uwbDistance: Float?
+    // UWB direction stored as components so Equatable stays simple
     var uwbDirectionX: Float?
     var uwbDirectionY: Float?
     var uwbDirectionZ: Float?
@@ -41,7 +35,6 @@ struct PeerLocation: Identifiable, Equatable {
     // MARK: - Metadata
     let timestamp: Date
 
-    /// Transport type for the beacon response
     enum TransportType: String, Codable {
         case ble = "BLE"
         case relay = "Relay"
@@ -49,36 +42,22 @@ struct PeerLocation: Identifiable, Equatable {
 
     // MARK: - Computed Properties
 
-    /// Get the PeerID from stored string
-    var peerID: PeerID { PeerID(str: peerIDString) }
-
-    /// Get coordinate if available
     var coordinate: CLLocationCoordinate2D? {
         guard let lat = latitude, let lon = longitude else { return nil }
         return CLLocationCoordinate2D(latitude: lat, longitude: lon)
     }
 
-    /// Get UWB direction vector if available
     var uwbDirection: simd_float3? {
         guard let x = uwbDirectionX, let y = uwbDirectionY, let z = uwbDirectionZ else { return nil }
         return simd_float3(x, y, z)
     }
 
-    /// Whether the peer has valid location data
     var hasLocation: Bool { latitude != nil && longitude != nil }
-
-    /// Whether the location data is stale (older than 5 minutes)
-    var isStale: Bool { Date().timeIntervalSince(timestamp) > 300 }
-
-    /// Whether UWB data is available
-    var hasUWB: Bool { uwbSupported && uwbToken != nil }
 
     // MARK: - Initializer
 
-    /// Create with explicit values
     init(
-        peerIDString: String,
-        gpsEnabled: Bool,
+        id: String,
         latitude: Double?,
         longitude: Double?,
         altitude: Double?,
@@ -86,13 +65,9 @@ struct PeerLocation: Identifiable, Equatable {
         transport: TransportType,
         pingMs: Int,
         peerRSSI: Int?,
-        uwbSupported: Bool,
-        uwbToken: Data?,
         timestamp: Date
     ) {
-        self.id = peerIDString
-        self.peerIDString = peerIDString
-        self.gpsEnabled = gpsEnabled
+        self.id = id
         self.latitude = latitude
         self.longitude = longitude
         self.altitude = altitude
@@ -100,8 +75,6 @@ struct PeerLocation: Identifiable, Equatable {
         self.transport = transport
         self.pingMs = pingMs
         self.peerRSSI = peerRSSI
-        self.uwbSupported = uwbSupported
-        self.uwbToken = uwbToken
         self.uwbDistance = nil
         self.uwbDirectionX = nil
         self.uwbDirectionY = nil
@@ -125,12 +98,29 @@ struct PeerLocation: Identifiable, Equatable {
         lhs.id == rhs.id &&
         lhs.latitude == rhs.latitude &&
         lhs.longitude == rhs.longitude &&
-        lhs.gpsEnabled == rhs.gpsEnabled &&
         lhs.transport == rhs.transport &&
         lhs.pingMs == rhs.pingMs &&
         lhs.peerRSSI == rhs.peerRSSI &&
-        lhs.uwbSupported == rhs.uwbSupported &&
         lhs.uwbDistance == rhs.uwbDistance &&
+        lhs.uwbDirectionX == rhs.uwbDirectionX &&
+        lhs.uwbDirectionY == rhs.uwbDirectionY &&
+        lhs.uwbDirectionZ == rhs.uwbDirectionZ &&
         lhs.timestamp == rhs.timestamp
+    }
+}
+
+// MARK: - Bearing
+
+extension CLLocationCoordinate2D {
+    /// Great-circle initial bearing to another coordinate, in degrees from true north
+    func bearing(to other: CLLocationCoordinate2D) -> Double {
+        let lat1 = latitude * .pi / 180
+        let lat2 = other.latitude * .pi / 180
+        let dLon = (other.longitude - longitude) * .pi / 180
+
+        let y = sin(dLon) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+
+        return atan2(y, x) * 180 / .pi
     }
 }

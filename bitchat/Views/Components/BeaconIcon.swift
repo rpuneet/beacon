@@ -2,28 +2,22 @@
 // BeaconIcon.swift
 // bitchat
 //
-// Typographic beacon glyph: a dot broadcasting, ((•)), in the app's
-// monospace voice. Minimal, scales with text, no custom drawing.
+// The beacon glyph: a dot radiating waves, using the native SF Symbol so
+// it stays crisp and consistent with the other header symbols.
 //
 
 import SwiftUI
 
 struct BeaconIcon: View {
     let size: CGFloat
-    var color: Color = .green
+    /// nil inherits the surrounding tint, like other header symbols
+    var color: Color? = nil
 
     var body: some View {
-        HStack(spacing: 0) {
-            Text(verbatim: "((")
-                .foregroundColor(color.opacity(0.55))
-            Text(verbatim: "•")
-                .foregroundColor(color)
-            Text(verbatim: "))")
-                .foregroundColor(color.opacity(0.55))
-        }
-        .font(.bitchatSystem(size: size, weight: .semibold, design: .monospaced))
-        .fixedSize()
-        .accessibilityHidden(true)
+        Image(systemName: "dot.radiowaves.left.and.right")
+            .font(.system(size: size, weight: .semibold))
+            .foregroundColor(color)
+            .accessibilityHidden(true)
     }
 }
 

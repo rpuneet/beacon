@@ -527,16 +527,7 @@ struct BeaconView: View {
         guard let myLoc = locationManager.currentLocation,
               let peerCoord = location.coordinate,
               let heading = locationManager.currentHeading else { return nil }
-
-        let lat1 = myLoc.coordinate.latitude * .pi / 180
-        let lat2 = peerCoord.latitude * .pi / 180
-        let dLon = (peerCoord.longitude - myLoc.coordinate.longitude) * .pi / 180
-
-        let y = sin(dLon) * cos(lat2)
-        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
-        let bearing = atan2(y, x) * 180 / .pi
-
-        return bearing - heading
+        return myLoc.coordinate.bearing(to: peerCoord) - heading
     }
 
     // MARK: - Favorites Section

@@ -130,11 +130,12 @@ final class BeaconService: ObservableObject {
         trackedPeerWasConnected = true
 
         let requestID = UUID().uuidString.prefix(8).description
-        let rssi = ble.getRSSI(for: peerID).map { String($0) } ?? ""
         // Tracking mode wants UWB precision: offer our discovery token
-        let token = uwbTokenField(for: noiseKey, forceExchange: false)
         let locationStr = encodeLocation(for: noiseKey)
-        let content = "[PING]:\(requestID):\(rssi):\(locationStr)\(token)"
+        let content = BeaconWire.encode(
+            kind: .ping, requestID: requestID, rssi: ble.getRSSI(for: peerID),
+            locationStr: locationStr, uwbTokenBase64: uwbTokenBase64(for: noiseKey, forceExchange: false)
+        )
 
         prunePendingPings()
         pendingPings[requestID] = (noiseKey: noiseKey, sentAt: Date())
@@ -160,9 +161,9 @@ final class BeaconService: ObservableObject {
         prunePendingPings()
         for (peerID, noiseKey) in connectedFavorites {
             let requestID = UUID().uuidString.prefix(8).description
-            let rssi = ble.getRSSI(for: peerID).map { String($0) } ?? ""
             let locationStr = encodeLocation(for: noiseKey)
-            let content = "[PING]:\(requestID):\(rssi):\(locationStr)"
+            let content = BeaconWire.encode(kind: .ping, requestID: requestID,
+                                            rssi: ble.getRSSI(for: peerID), locationStr: locationStr)
 
             pendingPings[requestID] = (noiseKey: noiseKey, sentAt: Date())
             ble.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: requestID)
@@ -245,7 +246,7 @@ final class BeaconService: ObservableObject {
         // Store sender's location (their disclosure, so always accepted)
         if let location = message.location {
             storePeerLocation(noiseKey: noiseKey, location: location, rssi: message.rssi,
-                              transport: transport, pingMs: 0, uwbTokenPresent: message.uwbToken != nil)
+                              transport: transport, pingMs: 0)
             auditLog.record(.locationReceived, peerFingerprint: PeerID(publicKey: noiseKey).id, peerName: peerName(for: noiseKey))
         }
 
@@ -290,7 +291,7 @@ final class BeaconService: ObservableObject {
 
         if let location = message.location {
             storePeerLocation(noiseKey: pending.noiseKey, location: location, rssi: message.rssi,
-                              transport: transport, pingMs: rtt, uwbTokenPresent: message.uwbToken != nil)
+                              transport: transport, pingMs: rtt)
             auditLog.record(.locationReceived, peerFingerprint: PeerID(publicKey: pending.noiseKey).id, peerName: peerName(for: pending.noiseKey))
         }
     }
@@ -299,10 +300,11 @@ final class BeaconService: ObservableObject {
 
     private func sendPong(to peerID: PeerID, noiseKey: Data, requestID: String, includeUWBToken: Bool) {
         guard let ble = bleService else { return }
-        let rssi = ble.getRSSI(for: peerID).map { String($0) } ?? ""
-        let token = includeUWBToken ? uwbTokenField(for: noiseKey, forceExchange: true) : ""
         let locationStr = encodeLocation(for: noiseKey)
-        let content = "[PONG]:\(requestID):\(rssi):\(locationStr)\(token)"
+        let content = BeaconWire.encode(
+            kind: .pong, requestID: requestID, rssi: ble.getRSSI(for: peerID), locationStr: locationStr,
+            uwbTokenBase64: includeUWBToken ? uwbTokenBase64(for: noiseKey, forceExchange: true) : nil
+        )
         ble.sendPrivateMessage(content, to: peerID, recipientNickname: "", messageID: UUID().uuidString)
         SecureLogger.info("[Beacon] PONG → \(peerID.id.prefix(8))", category: .session)
 
@@ -343,14 +345,12 @@ final class BeaconService: ObservableObject {
     }
 
     private func storePeerLocation(noiseKey: Data, location loc: BeaconWire.Location,
-                                   rssi: Int?, transport: PeerLocation.TransportType, pingMs: Int,
-                                   uwbTokenPresent: Bool = false) {
+                                   rssi: Int?, transport: PeerLocation.TransportType, pingMs: Int) {
         let peerID = PeerID(publicKey: noiseKey)
         var location = PeerLocation(
-            peerIDString: peerID.id, gpsEnabled: true,
+            id: peerID.id,
             latitude: loc.lat, longitude: loc.lon, altitude: Double(loc.alt), horizontalAccuracy: Double(loc.hacc),
-            transport: transport, pingMs: pingMs, peerRSSI: rssi,
-            uwbSupported: uwbTokenPresent, uwbToken: nil, timestamp: Date()
+            transport: transport, pingMs: pingMs, peerRSSI: rssi, timestamp: Date()
         )
         // Carry over live UWB ranging so a GPS refresh doesn't blank it out
         if let existing = peerLocations[peerID.id], let distance = existing.uwbDistance {
@@ -381,7 +381,7 @@ final class BeaconService: ObservableObject {
         let snapshots = peerLocations.values.compactMap { loc -> LocationSnapshot? in
             guard let lat = loc.latitude, let lon = loc.longitude else { return nil }
             return LocationSnapshot(
-                peerID: loc.peerIDString, latitude: lat, longitude: lon,
+                peerID: loc.id, latitude: lat, longitude: lon,
                 altitude: loc.altitude ?? 0, horizontalAccuracy: loc.horizontalAccuracy ?? 0,
                 transport: loc.transport.rawValue, timestamp: loc.timestamp
             )
@@ -401,12 +401,11 @@ final class BeaconService: ObservableObject {
             let cutoff = Date().addingTimeInterval(-Self.lastKnownMaxAge)
             for snap in snapshots where snap.timestamp > cutoff {
                 peerLocations[snap.peerID] = PeerLocation(
-                    peerIDString: snap.peerID, gpsEnabled: true,
+                    id: snap.peerID,
                     latitude: snap.latitude, longitude: snap.longitude,
                     altitude: snap.altitude, horizontalAccuracy: snap.horizontalAccuracy,
                     transport: PeerLocation.TransportType(rawValue: snap.transport) ?? .ble,
-                    pingMs: 0, peerRSSI: nil,
-                    uwbSupported: false, uwbToken: nil, timestamp: snap.timestamp
+                    pingMs: 0, peerRSSI: nil, timestamp: snap.timestamp
                 )
             }
         } catch {
@@ -416,14 +415,13 @@ final class BeaconService: ObservableObject {
 
     // MARK: - UWB
 
-    /// Build the optional `:<tokenBase64>` message suffix for a peer.
+    /// Our discovery token as base64, when an exchange is warranted.
     /// `forceExchange` bypasses the session-state check (used when replying to
     /// a peer-initiated exchange or after a retry request).
-    private func uwbTokenField(for noiseKey: Data, forceExchange: Bool) -> String {
+    private func uwbTokenBase64(for noiseKey: Data, forceExchange: Bool) -> String? {
         let peerID = PeerID(publicKey: noiseKey)
-        guard forceExchange || uwbManager.shouldSendToken(to: peerID) else { return "" }
-        guard let tokenData = uwbManager.getMyTokenData(for: peerID) else { return "" }
-        return ":" + tokenData.base64EncodedString()
+        guard forceExchange || uwbManager.shouldSendToken(to: peerID) else { return nil }
+        return uwbManager.getMyTokenData(for: peerID)?.base64EncodedString()
     }
 
     private func subscribeToUWBUpdates() {
@@ -478,13 +476,13 @@ final class BeaconService: ObservableObject {
         guard let (peerID, _) = connectedPeers.first(where: { $0.noiseKey == noiseKey }) else { return }
 
         let requestID = UUID().uuidString.prefix(8).description
-        let rssi = ble.getRSSI(for: peerID).map { String($0) } ?? ""
-        let token = uwbTokenField(for: noiseKey, forceExchange: true)
-        guard !token.isEmpty else { return }
+        guard let token = uwbTokenBase64(for: noiseKey, forceExchange: true) else { return }
 
         let locationStr = encodeLocation(for: noiseKey)
         pendingPings[requestID] = (noiseKey: noiseKey, sentAt: Date())
-        ble.sendPrivateMessage("[PING]:\(requestID):\(rssi):\(locationStr)\(token)",
+        ble.sendPrivateMessage(BeaconWire.encode(kind: .ping, requestID: requestID,
+                                                 rssi: ble.getRSSI(for: peerID), locationStr: locationStr,
+                                                 uwbTokenBase64: token),
                                to: peerID, recipientNickname: "", messageID: requestID)
         auditLocationSent(noiseKey: noiseKey, locationStr: locationStr)
     }
@@ -499,8 +497,4 @@ final class BeaconService: ObservableObject {
         peerLocations.values.filter { $0.hasLocation }.count
     }
 
-    func clearLocations() {
-        peerLocations.removeAll()
-        uwbManager.endAllSessions()
-    }
 }

@@ -239,42 +239,6 @@ final class UWBTrackingManager: NSObject, ObservableObject {
         }
     }
 
-    /// End all active UWB sessions
-    func endAllSessions() {
-        for (_, session) in sessions {
-            session.invalidate()
-        }
-        sessions.removeAll()
-        sessionToPeerID.removeAll()
-        pendingTokenRequests.removeAll()
-
-        DispatchQueue.main.async {
-            self.activeSessions.removeAll()
-        }
-    }
-
-    /// Get the current UWB distance to a peer (if available)
-    /// - Parameter peerID: The peer to get distance for
-    /// - Returns: Distance in meters, or nil if not available
-    func getDistance(for peerID: PeerID) -> Float? {
-        let normalizedID = normalizedPeerID(peerID)
-        if case .active(let distance, _) = activeSessions[normalizedID] {
-            return distance
-        }
-        return nil
-    }
-
-    /// Get the current UWB direction to a peer (if available)
-    /// - Parameter peerID: The peer to get direction for
-    /// - Returns: Direction vector, or nil if not available
-    func getDirection(for peerID: PeerID) -> simd_float3? {
-        let normalizedID = normalizedPeerID(peerID)
-        if case .active(_, let direction) = activeSessions[normalizedID] {
-            return direction
-        }
-        return nil
-    }
-
     // MARK: - Private Methods
 
     private func peerIDForSession(_ session: NISession) -> PeerID? {
@@ -448,8 +412,5 @@ final class UWBTrackingManager: ObservableObject {
     func shouldSendToken(to peerID: PeerID) -> Bool { false }
     func handleReceivedToken(from peerID: PeerID, tokenData: Data) { /* no-op */ }
     func endSession(with peerID: PeerID) { /* no-op */ }
-    func endAllSessions() { /* no-op */ }
-    func getDistance(for peerID: PeerID) -> Float? { nil }
-    func getDirection(for peerID: PeerID) -> simd_float3? { nil }
 }
 #endif
