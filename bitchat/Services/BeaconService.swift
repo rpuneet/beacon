@@ -5,6 +5,7 @@
 // Simple beacon service for location sharing between favorites over mesh
 //
 
+import BitFoundation
 import Foundation
 import Combine
 import CoreLocation

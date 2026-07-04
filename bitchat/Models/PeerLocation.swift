@@ -5,6 +5,7 @@
 // Data model for peer location information from beacon pings
 //
 
+import BitFoundation
 import Foundation
 import CoreLocation
 import simd

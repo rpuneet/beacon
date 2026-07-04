@@ -6,6 +6,7 @@
 //
 
 import XCTest
+import BitFoundation
 @testable import bitchat
 
 final class DIVerificationTests: XCTestCase {

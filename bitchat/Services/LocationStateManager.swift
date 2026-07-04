@@ -14,7 +14,25 @@ protocol LocationStateManaging: AnyObject {
     func requestLocation()
     func startUpdatingLocation()
     func stopUpdatingLocation()
+    #if os(iOS)
+    // Heading updates (for Beacon compass tracking)
+    var headingFilter: CLLocationDegrees { get set }
+    func startUpdatingHeading()
+    func stopUpdatingHeading()
+    #endif
 }
+
+#if os(iOS)
+// No-op defaults so test doubles that don't care about heading stay minimal
+extension LocationStateManaging {
+    var headingFilter: CLLocationDegrees {
+        get { 0 }
+        set {}
+    }
+    func startUpdatingHeading() {}
+    func stopUpdatingHeading() {}
+}
+#endif
 
 protocol LocationStateGeocoding: AnyObject {
     func cancelGeocode()
@@ -61,6 +79,21 @@ private final class CLLocationManagerAdapter: NSObject, LocationStateManaging {
     func stopUpdatingLocation() {
         base.stopUpdatingLocation()
     }
+
+    #if os(iOS)
+    var headingFilter: CLLocationDegrees {
+        get { base.headingFilter }
+        set { base.headingFilter = newValue }
+    }
+
+    func startUpdatingHeading() {
+        base.startUpdatingHeading()
+    }
+
+    func stopUpdatingHeading() {
+        base.stopUpdatingHeading()
+    }
+    #endif
 }
 
 private final class CLGeocoderAdapter: LocationStateGeocoding {

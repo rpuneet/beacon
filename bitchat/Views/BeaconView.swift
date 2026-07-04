@@ -5,6 +5,7 @@
 // Beacon view - location sharing for mutual favorites
 //
 
+import BitFoundation
 import SwiftUI
 import MapKit
 
