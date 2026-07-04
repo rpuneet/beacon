@@ -45,6 +45,7 @@ final class BeaconService: ObservableObject {
     private var trackedPeerWasConnected = true
     private var pendingPings: [String: (noiseKey: Data, sentAt: Date)] = [:]
     private var lastSentAudit: [String: Date] = [:]
+    private var lastPingHaptic: [String: Date] = [:]
     private var lastUWBFailureLogged: [String: String] = [:]
     private var cancellables = Set<AnyCancellable>()
 
@@ -60,7 +61,9 @@ final class BeaconService: ObservableObject {
     private var auditLog: BeaconAuditLog { .shared }
     private var uwbManager: UWBTrackingManager { .shared }
 
-    private init() {}
+    private init() {
+        loadLastKnownLocations()
+    }
 
     // MARK: - Configuration
 
@@ -227,6 +230,14 @@ final class BeaconService: ObservableObject {
 
         SecureLogger.info("[Beacon] PING ← \(peerID.id.prefix(8))", category: .session)
 
+        // "Ping → they vibrate": let the pinged person feel it, throttled so
+        // 1 Hz tracking pings don't buzz continuously
+        let senderFingerprint = PeerID(publicKey: noiseKey).id
+        if lastPingHaptic[senderFingerprint].map({ Date().timeIntervalSince($0) > 10 }) ?? true {
+            lastPingHaptic[senderFingerprint] = Date()
+            HapticManager.shared.pingStarted()
+        }
+
         let tokenData = tokenStr.isEmpty ? nil : Data(base64Encoded: tokenStr)
         if !tokenStr.isEmpty && tokenData == nil {
             SecureLogger.error("[Beacon] Malformed UWB token in PING from \(peerID.id.prefix(8))", category: .session)
@@ -376,6 +387,61 @@ final class BeaconService: ObservableObject {
             location.updateUWBDistance(distance, direction: existing.uwbDirection)
         }
         peerLocations[peerID.id] = location
+        saveLastKnownLocations()
+    }
+
+    // MARK: - Last-Known Location Persistence
+
+    /// Snapshot persisted so favorites still appear on the map after an app
+    /// restart (grey/stale until they respond again).
+    private struct LocationSnapshot: Codable {
+        let peerID: String
+        let latitude: Double
+        let longitude: Double
+        let altitude: Double
+        let horizontalAccuracy: Double
+        let transport: String
+        let timestamp: Date
+    }
+
+    private static let lastKnownKey = "beacon.lastKnownLocations"
+    private static let lastKnownMaxAge: TimeInterval = 7 * 24 * 3600
+
+    private func saveLastKnownLocations() {
+        let snapshots = peerLocations.values.compactMap { loc -> LocationSnapshot? in
+            guard let lat = loc.latitude, let lon = loc.longitude else { return nil }
+            return LocationSnapshot(
+                peerID: loc.peerIDString, latitude: lat, longitude: lon,
+                altitude: loc.altitude ?? 0, horizontalAccuracy: loc.horizontalAccuracy ?? 0,
+                transport: loc.transport.rawValue, timestamp: loc.timestamp
+            )
+        }
+        do {
+            let data = try JSONEncoder().encode(snapshots)
+            UserDefaults.standard.set(data, forKey: Self.lastKnownKey)
+        } catch {
+            SecureLogger.error("[Beacon] Failed to persist last-known locations: \(error)", category: .session)
+        }
+    }
+
+    private func loadLastKnownLocations() {
+        guard let data = UserDefaults.standard.data(forKey: Self.lastKnownKey) else { return }
+        do {
+            let snapshots = try JSONDecoder().decode([LocationSnapshot].self, from: data)
+            let cutoff = Date().addingTimeInterval(-Self.lastKnownMaxAge)
+            for snap in snapshots where snap.timestamp > cutoff {
+                peerLocations[snap.peerID] = PeerLocation(
+                    peerIDString: snap.peerID, gpsEnabled: true,
+                    latitude: snap.latitude, longitude: snap.longitude,
+                    altitude: snap.altitude, horizontalAccuracy: snap.horizontalAccuracy,
+                    transport: PeerLocation.TransportType(rawValue: snap.transport) ?? .ble,
+                    pingMs: 0, peerRSSI: nil,
+                    uwbSupported: false, uwbToken: nil, timestamp: snap.timestamp
+                )
+            }
+        } catch {
+            SecureLogger.error("[Beacon] Failed to load last-known locations: \(error)", category: .session)
+        }
     }
 
     // MARK: - UWB

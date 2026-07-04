@@ -101,6 +101,18 @@ struct TrackingView: View {
         locationManager.currentLocation?.horizontalAccuracy ?? 100
     }
 
+    /// Vertical separation hint ("≈2 floors above you") when the altitude
+    /// difference is large enough to be more than GPS noise.
+    private var floorDifferenceText: String? {
+        guard let peerAlt = peerLocation.altitude, peerAlt != 0,
+              let myAlt = locationManager.currentLocation?.altitude else { return nil }
+        let diff = peerAlt - myAlt
+        guard abs(diff) >= 8 else { return nil }
+        let floors = max(1, Int((abs(diff) / 3.0).rounded()))
+        return diff > 0 ? "≈\(floors) floor\(floors == 1 ? "" : "s") above you"
+                        : "≈\(floors) floor\(floors == 1 ? "" : "s") below you"
+    }
+
     /// Whether we're close enough that GPS isn't reliable
     private var useProximityMode: Bool {
         guard let dist = distanceMeters else { return true }
@@ -187,6 +199,12 @@ struct TrackingView: View {
                         Label("GPS Estimate", systemImage: "location.fill")
                             .font(.caption)
                             .foregroundColor(.orange)
+                    }
+
+                    if let floorHint = floorDifferenceText {
+                        Label(floorHint, systemImage: "arrow.up.arrow.down")
+                            .font(.caption)
+                            .foregroundColor(.cyan)
                     }
 
                     if let rssi = peerLocation.peerRSSI {

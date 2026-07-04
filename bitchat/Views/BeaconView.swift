@@ -37,6 +37,9 @@ struct BeaconView: View {
 
             ZStack(alignment: .bottom) {
                 mapView
+                if locationManager.permissionState == .denied || locationManager.permissionState == .restricted {
+                    locationPermissionBanner
+                }
                 if let location = selectedLocation {
                     trackingOverlay(location: location)
                 }
@@ -54,11 +57,19 @@ struct BeaconView: View {
             if let loc = locationManager.currentLocation {
                 mapRegion.center = loc.coordinate
             }
+            // Requests location permission if not yet determined; beginTrackingMode
+            // alone silently no-ops without authorization
+            locationManager.enableLocationChannels()
             locationManager.beginTrackingMode()
             if favoritesCount > 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     beaconService.pingAllFavorites()
                 }
+            }
+        }
+        .onChange(of: locationManager.permissionState) { state in
+            if state == .authorized {
+                locationManager.beginTrackingMode()
             }
         }
         .onDisappear {
@@ -323,11 +334,57 @@ struct BeaconView: View {
         }
     }
 
-    /// When tracking, fit both user and peer in the map
+    /// Coordinates the map should scale to show: user + tracked peer while
+    /// tracking, or user + all located peers while browsing.
     private var fitCoordinatesForTracking: [CLLocationCoordinate2D]? {
-        guard let peerCoord = selectedLocation?.coordinate,
-              let myLoc = locationManager.currentLocation else { return nil }
-        return [myLoc.coordinate, peerCoord]
+        guard let myLoc = locationManager.currentLocation else { return nil }
+        if let peerCoord = selectedLocation?.coordinate {
+            return [myLoc.coordinate, peerCoord]
+        }
+        let peerCoords = mapAnnotations.map(\.coordinate)
+        guard !peerCoords.isEmpty else { return nil }
+        return [myLoc.coordinate] + peerCoords
+    }
+
+    // MARK: - Location Permission Banner
+
+    private var locationPermissionBanner: some View {
+        VStack {
+            HStack(spacing: 10) {
+                Image(systemName: "location.slash.fill")
+                    .foregroundColor(.red)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("location is off")
+                        .font(.bitchatSystem(size: 13, weight: .semibold, design: .monospaced))
+                    Text("beacon can't show you or share your position")
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("settings") { openSystemLocationSettings() }
+                    .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.blue)
+                    .buttonStyle(.plain)
+            }
+            .padding(12)
+            .background(.ultraThinMaterial)
+            .cornerRadius(12)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            Spacer()
+        }
+    }
+
+    private func openSystemLocationSettings() {
+        #if os(iOS)
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
+        #elseif os(macOS)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices") {
+            NSWorkspace.shared.open(url)
+        }
+        #endif
     }
 
     // MARK: - Tracking Overlay

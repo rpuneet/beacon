@@ -19,7 +19,7 @@ Compact text protocol implementation:
 - `pingAllFavorites()` - Pings all connected mutual favorites
 - `handlePrivateMessage()` - Parses [PING]/[PONG] messages
 - `encodeLocation()` / `decodeLocation()` - Simple text format
-- Auto-ping mode (every 30s when enabled)
+- Auto-ping mode (every 10s when enabled)
 
 ### 1.2 PeerLocation.swift ✓
 **Path:** `bitchat/Models/PeerLocation.swift`

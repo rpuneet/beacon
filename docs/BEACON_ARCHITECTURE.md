@@ -48,12 +48,6 @@ The location field is coarsened per `BeaconSettings` before sending.
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                        BeaconViewModel                           │
-│              (UI state, map region, selection)                   │
-└───────────────────────────────┬─────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
 │                         BeaconService                            │
 │                                                                  │
 │  • pingAllFavorites()         - Ping all connected favorites    │
@@ -79,7 +73,9 @@ The location field is coarsened per `BeaconSettings` before sending.
 
 ### Compact Text Format
 
-Messages use a simple colon-separated format that fits within the 255-byte TLV limit:
+Messages use a simple colon-separated format. Tokenless messages fit the
+upstream 255-byte TLV limit; messages carrying a UWB token use the fork's
+`content16` TLV extension (2-byte length), which upstream clients ignore:
 
 ```
 [PING]:ID:rssi:lat,lon,alt,hacc,vacc
@@ -131,12 +127,13 @@ Messages use a simple colon-separated format that fits within the 255-byte TLV l
 - **Use case:** Hot/cold feedback when close
 - **UI:** Proximity circle with levels: Far → Medium → Near → Very Near → Here
 
-### 4.3 UWB (Precise Distance) — Future
+### 4.3 UWB (Precise Distance)
 
 - **Accuracy:** ~10cm when in range
 - **Range:** ~10-30 meters line-of-sight
 - **Requirements:** Both devices need UWB (iPhone 11+)
-- **Status:** Infrastructure exists, protocol support pending
+- **Status:** Implemented — discovery tokens are exchanged in the optional
+  trailing PING/PONG field while tracking; ranging feeds TrackingView
 
 ---
 
@@ -153,7 +150,7 @@ final class BeaconService: ObservableObject {
 
     @Published private(set) var peerLocations: [String: PeerLocation] = [:]
     @Published private(set) var pingState: BeaconPingState = .idle
-    @Published var isBeaconModeEnabled: Bool = false  // Auto-ping every 30s
+    @Published var isBeaconModeEnabled: Bool = false  // Auto-ping every 10s
 
     func configure(ble: BLEService)
     func pingAllFavorites()
@@ -257,7 +254,7 @@ For each favorite:
 └── sendPrivateMessage(content, to: peerID)
        │
        ▼
-15s timeout → finishPingIfNeeded()
+5s timeout resets isPinging; unanswered pings pruned after 10s
 ```
 
 ### 6.2 Receiving Ping

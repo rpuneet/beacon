@@ -45,16 +45,20 @@ struct CompassMapView: UIViewRepresentable {
     func updateUIView(_ mapView: MKMapView, context: Context) {
         updateAnnotations(mapView: mapView)
 
-        // Fit to coordinates if provided
+        // Fit to coordinates if provided, but only when the set materially
+        // changed — refitting on every update would fight pan/zoom gestures
         if let coords = fitCoordinates, !coords.isEmpty {
-            let mapRect = coords.reduce(MKMapRect.null) { rect, coord in
-                let point = MKMapPoint(coord)
-                let pointRect = MKMapRect(x: point.x - 100, y: point.y - 100, width: 200, height: 200)
-                return rect.union(pointRect)
+            if context.coordinator.shouldRefit(for: coords) {
+                mapView.userTrackingMode = .none
+                let mapRect = coords.reduce(MKMapRect.null) { rect, coord in
+                    let point = MKMapPoint(coord)
+                    let pointRect = MKMapRect(x: point.x - 100, y: point.y - 100, width: 200, height: 200)
+                    return rect.union(pointRect)
+                }
+                let padding = UIEdgeInsets(top: 60, left: 40, bottom: 120, right: 40)
+                mapView.setVisibleMapRect(mapRect, edgePadding: padding, animated: true)
+                context.coordinator.lastFitCoords = coords
             }
-            let padding = UIEdgeInsets(top: 60, left: 40, bottom: 120, right: 40)
-            mapView.setVisibleMapRect(mapRect, edgePadding: padding, animated: true)
-            context.coordinator.lastFitCoords = coords
         } else if context.coordinator.lastFitCoords != nil {
             // Switched back to no fit - return to user tracking
             context.coordinator.lastFitCoords = nil
@@ -91,6 +95,16 @@ struct CompassMapView: UIViewRepresentable {
         var lastFitCoords: [CLLocationCoordinate2D]?
 
         init(_ parent: CompassMapView) { self.parent = parent }
+
+        /// Refit only when a coordinate was added/removed or moved > 50 m,
+        /// so user pan/zoom isn't constantly overridden.
+        func shouldRefit(for coords: [CLLocationCoordinate2D]) -> Bool {
+            guard let last = lastFitCoords, last.count == coords.count else { return true }
+            for (a, b) in zip(last, coords) {
+                if MKMapPoint(a).distance(to: MKMapPoint(b)) > 50 { return true }
+            }
+            return false
+        }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             guard let beacon = annotation as? BeaconPointAnnotation else { return nil }

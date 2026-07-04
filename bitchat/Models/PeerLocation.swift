@@ -9,76 +9,6 @@ import Foundation
 import CoreLocation
 import simd
 
-// MARK: - Pong Response Data (JSON structure for [PONG] payload)
-
-/// JSON structure sent in [PONG] response, containing GPS, UWB, and BLE data
-struct PongResponseData: Codable {
-    struct GPS: Codable {
-        let enabled: Bool
-        let lat: Double?
-        let lon: Double?
-        let alt: Double?
-        let acc: Double?
-    }
-
-    struct UWB: Codable {
-        let supported: Bool
-        let token: String?  // base64-encoded discovery token
-    }
-
-    struct BLE: Codable {
-        let rssi: Int?
-    }
-
-    let gps: GPS
-    let uwb: UWB
-    let ble: BLE
-    let ts: Int64  // timestamp in milliseconds
-
-    /// Create response data from current device state
-    static func build(
-        gpsEnabled: Bool,
-        location: CLLocation?,
-        uwbSupported: Bool,
-        uwbToken: Data?,
-        rssiForRequester: Int?
-    ) -> PongResponseData {
-        let gps = GPS(
-            enabled: gpsEnabled,
-            lat: location?.coordinate.latitude,
-            lon: location?.coordinate.longitude,
-            alt: location?.altitude,
-            acc: location?.horizontalAccuracy
-        )
-
-        let uwb = UWB(
-            supported: uwbSupported,
-            token: uwbToken?.base64EncodedString()
-        )
-
-        let ble = BLE(rssi: rssiForRequester)
-
-        return PongResponseData(
-            gps: gps,
-            uwb: uwb,
-            ble: ble,
-            ts: Int64(Date().timeIntervalSince1970 * 1000)
-        )
-    }
-
-    /// Encode to base64 string for [PONG] message
-    func toBase64() -> String? {
-        guard let jsonData = try? JSONEncoder().encode(self) else { return nil }
-        return jsonData.base64EncodedString()
-    }
-
-    /// Decode from base64 string in [PONG] message
-    static func fromBase64(_ base64String: String) -> PongResponseData? {
-        guard let data = Data(base64Encoded: base64String) else { return nil }
-        return try? JSONDecoder().decode(PongResponseData.self, from: data)
-    }
-}
-
 // MARK: - Peer Location
 
 /// Represents a peer's location and connection information from a beacon ping response
@@ -142,47 +72,9 @@ struct PeerLocation: Identifiable, Equatable {
     /// Whether UWB data is available
     var hasUWB: Bool { uwbSupported && uwbToken != nil }
 
-    // MARK: - Factory Initializer
+    // MARK: - Initializer
 
-    /// Create from a PongResponseData
-    init(
-        peerID: PeerID,
-        response: PongResponseData,
-        transport: TransportType,
-        pingMs: Int
-    ) {
-        self.id = peerID.id
-        self.peerIDString = peerID.id
-
-        // GPS data
-        self.gpsEnabled = response.gps.enabled
-        self.latitude = response.gps.lat
-        self.longitude = response.gps.lon
-        self.altitude = response.gps.alt
-        self.horizontalAccuracy = response.gps.acc
-
-        // Signal data
-        self.transport = transport
-        self.pingMs = pingMs
-        self.peerRSSI = response.ble.rssi
-
-        // UWB data
-        self.uwbSupported = response.uwb.supported
-        if let tokenBase64 = response.uwb.token {
-            self.uwbToken = Data(base64Encoded: tokenBase64)
-        } else {
-            self.uwbToken = nil
-        }
-        self.uwbDistance = nil
-        self.uwbDirectionX = nil
-        self.uwbDirectionY = nil
-        self.uwbDirectionZ = nil
-
-        // Timestamp from response
-        self.timestamp = Date(timeIntervalSince1970: Double(response.ts) / 1000.0)
-    }
-
-    /// Create with explicit values (for testing or manual construction)
+    /// Create with explicit values
     init(
         peerIDString: String,
         gpsEnabled: Bool,
