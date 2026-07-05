@@ -83,9 +83,10 @@ struct BeaconSettingsView: View {
     // MARK: - Sharing
 
     private var sharingSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             sectionTitle("sharing")
 
+            card {
             Toggle(isOn: $settings.isSharingEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("share my location")
@@ -108,26 +109,41 @@ struct BeaconSettingsView: View {
             }
             .tint(.green)
             .disabled(!settings.isSharingEnabled)
+            }
         }
     }
 
     // MARK: - Precision
 
     private var precisionSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             sectionTitle("precision")
 
-            Picker("precision", selection: $settings.precision) {
-                ForEach(BeaconSettings.PrecisionLevel.allCases) { level in
-                    Text(level.displayName).tag(level)
+            card {
+                HStack(spacing: 6) {
+                    ForEach(BeaconSettings.PrecisionLevel.allCases) { level in
+                        Button(action: { settings.precision = level }) {
+                            Text(level.displayName)
+                                .font(.bitchatSystem(size: 12, weight: settings.precision == level ? .semibold : .regular, design: .monospaced))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 36)
+                                .background(
+                                    settings.precision == level ? textColor.opacity(0.2) : Color.secondary.opacity(0.08),
+                                    in: Capsule()
+                                )
+                                .overlay(Capsule().stroke(settings.precision == level ? textColor : .clear, lineWidth: 1))
+                                .foregroundColor(settings.precision == level ? textColor : .secondary)
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-            }
-            .pickerStyle(.segmented)
-            .disabled(!settings.isSharingEnabled)
+                .disabled(!settings.isSharingEnabled)
 
-            Text(precisionCaption)
-                .font(.bitchatSystem(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
+                Text(precisionCaption)
+                    .font(.bitchatSystem(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
@@ -150,16 +166,18 @@ struct BeaconSettingsView: View {
     }
 
     private var perFriendSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             sectionTitle("per friend")
 
-            if favoriteItems.isEmpty {
-                Text("no favorites yet")
-                    .font(.bitchatSystem(size: 12, design: .monospaced))
-                    .foregroundColor(.secondary)
-            } else {
-                ForEach(favoriteItems, id: \.noiseKey) { fav in
-                    friendRow(fav)
+            card {
+                if favoriteItems.isEmpty {
+                    Text("no favorites yet — favorite people in chat to control sharing per friend")
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                } else {
+                    ForEach(favoriteItems, id: \.noiseKey) { fav in
+                        friendRow(fav)
+                    }
                 }
             }
         }
@@ -205,7 +223,7 @@ struct BeaconSettingsView: View {
     // MARK: - Audit
 
     private var auditSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 sectionTitle("activity (24h)")
                 Spacer()
@@ -219,13 +237,20 @@ struct BeaconSettingsView: View {
                 }
             }
 
-            if auditLog.recentEvents.isEmpty {
-                Text("no location activity")
-                    .font(.bitchatSystem(size: 12, design: .monospaced))
-                    .foregroundColor(.secondary)
-            } else {
-                ForEach(auditLog.recentEvents.prefix(50)) { event in
-                    auditRow(event)
+            card {
+                if auditLog.recentEvents.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.shield")
+                            .font(.system(size: 13))
+                            .foregroundColor(.green)
+                        Text("no location activity — nothing has been shared")
+                            .font(.bitchatSystem(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    ForEach(auditLog.recentEvents.prefix(50)) { event in
+                        auditRow(event)
+                    }
                 }
             }
         }
@@ -275,7 +300,16 @@ struct BeaconSettingsView: View {
 
     private func sectionTitle(_ title: String) -> some View {
         Text(title)
-            .font(.bitchatSystem(size: 13, weight: .medium, design: .monospaced))
-            .foregroundColor(textColor)
+            .font(.bitchatSystem(size: 11, weight: .medium, design: .monospaced))
+            .tracking(1.5)
+            .foregroundColor(.secondary)
+    }
+
+    /// Card container: green is the accent, structure comes from surfaces
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) { content() }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
     }
 }

@@ -26,24 +26,42 @@ struct CompassMapView: UIViewRepresentable {
     let annotations: [BeaconAnnotation]
     let showsUserLocation: Bool
     let fitCoordinates: [CLLocationCoordinate2D]?  // Fit map to show these coordinates
+    var recenterTrigger: Int = 0  // increment to snap back to the user
     let onAnnotationTap: (Data) -> Void
 
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
         mapView.delegate = context.coordinator
         mapView.showsUserLocation = showsUserLocation
-        mapView.showsCompass = true
+        // Muted, POI-free, always-dark cartography: friends are the only
+        // saturated objects on the map, not cafes and dealerships
+        let config = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
+        config.pointOfInterestFilter = .excludingAll
+        config.showsTraffic = false
+        mapView.preferredConfiguration = config
+        mapView.overrideUserInterfaceStyle = .dark
+        mapView.showsCompass = false
         mapView.isRotateEnabled = true
         mapView.isZoomEnabled = true
         mapView.isScrollEnabled = true
         mapView.isPitchEnabled = false
-        mapView.userTrackingMode = .followWithHeading
+        // North-up situational awareness; heading-up belongs to TrackingView
+        mapView.userTrackingMode = .follow
         mapView.register(BeaconAnnotationView.self, forAnnotationViewWithReuseIdentifier: "beacon")
         return mapView
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
         updateAnnotations(mapView: mapView)
+
+        if recenterTrigger != context.coordinator.lastRecenterTrigger {
+            context.coordinator.lastRecenterTrigger = recenterTrigger
+            context.coordinator.lastFitCoords = nil
+            // Grace period so the next fit pass doesn't immediately cancel follow
+            context.coordinator.ignoreRefitUntil = Date().addingTimeInterval(3)
+            mapView.setUserTrackingMode(.follow, animated: true)
+            return
+        }
 
         // Fit to coordinates if provided, but only when the set materially
         // changed — refitting on every update would fight pan/zoom gestures
@@ -62,7 +80,7 @@ struct CompassMapView: UIViewRepresentable {
         } else if context.coordinator.lastFitCoords != nil {
             // Switched back to no fit - return to user tracking
             context.coordinator.lastFitCoords = nil
-            mapView.userTrackingMode = .followWithHeading
+            mapView.userTrackingMode = .follow
         }
     }
 
@@ -93,12 +111,15 @@ struct CompassMapView: UIViewRepresentable {
     class Coordinator: NSObject, MKMapViewDelegate {
         var parent: CompassMapView
         var lastFitCoords: [CLLocationCoordinate2D]?
+        var lastRecenterTrigger = 0
+        var ignoreRefitUntil = Date.distantPast
 
         init(_ parent: CompassMapView) { self.parent = parent }
 
         /// Refit only when a coordinate was added/removed or moved > 50 m,
         /// so user pan/zoom isn't constantly overridden.
         func shouldRefit(for coords: [CLLocationCoordinate2D]) -> Bool {
+            if Date() < ignoreRefitUntil { return false }
             guard let last = lastFitCoords, last.count == coords.count else { return true }
             for (a, b) in zip(last, coords) {
                 if MKMapPoint(a).distance(to: MKMapPoint(b)) > 50 { return true }
@@ -188,6 +209,10 @@ class BeaconAnnotationView: MKAnnotationView {
         bubble.backgroundColor = UIColor(BeaconProfile.peerColor(nickname: name))
         bubble.layer.borderColor = (annotation.transport == .ble ? UIColor.systemGreen : UIColor.systemPurple).cgColor
         nameChip.text = name
+        // Chip hugs the text instead of filling the 88pt frame
+        let textWidth = (name as NSString).size(withAttributes: [.font: nameChip.font!]).width + 16
+        let chipWidth = min(textWidth, frame.width)
+        nameChip.frame = CGRect(x: (frame.width - chipWidth) / 2, y: Self.bubbleSize + 4, width: chipWidth, height: 16)
     }
 }
 
