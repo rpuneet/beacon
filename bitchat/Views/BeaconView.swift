@@ -20,6 +20,7 @@ struct BeaconView: View {
     @ObservedObject private var favoritesService = FavoritesPersistenceService.shared
     @ObservedObject private var locationManager = LocationStateManager.shared
     @ObservedObject private var auditLog = BeaconAuditLog.shared
+    @EnvironmentObject private var peerListModel: PeerListModel
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
 
@@ -39,7 +40,7 @@ struct BeaconView: View {
 
     private var isTracking: Bool { selectedFavoriteKey != nil }
 
-    private var favoritesSheetHeight: CGFloat { favoritesExpanded ? 300 : 96 }
+    private var favoritesSheetHeight: CGFloat { favoritesExpanded ? 380 : 96 }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -592,8 +593,8 @@ struct BeaconView: View {
 
     // MARK: - Favorites Sheet
 
-    /// Floating bottom sheet over the map: grabber, identity rows, and an
-    /// empty state that tells new users what to actually do.
+    /// "Who's around": friends (favorites, trackable) first, then everyone
+    /// else nearby (mesh + geohash people, tap → chat). Map and people, merged.
     private var favoritesSheet: some View {
         VStack(spacing: 0) {
             Capsule()
@@ -603,12 +604,13 @@ struct BeaconView: View {
                 .padding(.bottom, 10)
 
             HStack {
-                Text("friends")
+                Text("who's around")
                     .font(.bitchatSystem(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundColor(textColor)
                 Spacer()
-                if !filteredFavorites.isEmpty {
-                    Text("\(filteredFavorites.count)")
+                let total = filteredFavorites.count + nearbyPeople.count
+                if total > 0 {
+                    Text("\(total)")
                         .font(.bitchatSystem(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
@@ -616,18 +618,28 @@ struct BeaconView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 6)
 
-            if filteredFavorites.isEmpty {
+            if filteredFavorites.isEmpty && nearbyPeople.isEmpty {
                 emptyFavoritesState
             } else if favoritesExpanded {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(filteredFavorites, id: \.noiseKey) { fav in
-                            favoriteRow(fav)
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if !filteredFavorites.isEmpty {
+                            peopleSectionHeader("friends")
+                            ForEach(filteredFavorites, id: \.noiseKey) { fav in
+                                favoriteRow(fav)
+                            }
+                        }
+                        if !nearbyPeople.isEmpty {
+                            peopleSectionHeader("nearby")
+                            ForEach(nearbyPeople) { person in
+                                nearbyRow(person)
+                            }
                         }
                     }
+                    .padding(.bottom, 8)
                 }
             } else {
-                // Peek: avatar chips row
+                // Peek: friend avatar chips, then a "+N nearby" affordance
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
                         ForEach(filteredFavorites, id: \.noiseKey) { fav in
@@ -636,6 +648,14 @@ struct BeaconView: View {
                                                located: getLocation(for: fav.noiseKey)?.hasLocation == true)
                             }
                             .buttonStyle(.plain)
+                        }
+                        if !nearbyPeople.isEmpty {
+                            Text("+\(nearbyPeople.count) nearby")
+                                .font(.bitchatSystem(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 10)
+                                .frame(height: 34)
+                                .background(Color.secondary.opacity(0.12), in: Capsule())
                         }
                     }
                     .padding(.horizontal, 16)
@@ -657,6 +677,73 @@ struct BeaconView: View {
                 }
         )
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: favoritesExpanded)
+    }
+
+    private func peopleSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.bitchatSystem(size: 11, weight: .medium, design: .monospaced))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+    }
+
+    // MARK: - Nearby people (mesh + geohash), tap to chat
+
+    private struct NearbyPerson: Identifiable {
+        let id: String
+        let name: String
+        let subtitle: String
+        let open: () -> Void
+    }
+
+    private var nearbyPeople: [NearbyPerson] {
+        var people: [NearbyPerson] = []
+        // Mesh peers that aren't already friends (favorites)
+        for row in peerListModel.meshRows where !row.isMe && !row.isFavorite && !row.isBlocked {
+            let peerID = row.peerID
+            people.append(NearbyPerson(
+                id: "mesh:" + row.id,
+                name: row.displayName,
+                subtitle: row.isConnected ? "in bluetooth range" : "on the mesh",
+                open: { peerListModel.startConversation(with: peerID); onOpenChat?() }
+            ))
+        }
+        // Geohash channel participants
+        for row in peerListModel.geohashPeople where !row.isMe && !row.isBlocked {
+            let hex = row.id
+            people.append(NearbyPerson(
+                id: "geo:" + row.id,
+                name: row.displayName,
+                subtitle: row.isTeleported ? "teleported here" : "in this channel",
+                open: { peerListModel.openGeohashDirectMessage(with: hex); onOpenChat?() }
+            ))
+        }
+        return people
+    }
+
+    private func nearbyRow(_ person: NearbyPerson) -> some View {
+        Button(action: person.open) {
+            HStack(spacing: 12) {
+                identityBubble(nickname: person.name, size: 32, located: false)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(person.name)
+                        .font(.bitchatSystem(size: 13, weight: .medium, design: .monospaced))
+                        .lineLimit(1)
+                    Text(person.subtitle)
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Image(systemName: "bubble.left")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var emptyFavoritesState: some View {

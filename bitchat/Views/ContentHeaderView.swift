@@ -10,6 +10,7 @@ struct ContentHeaderView: View {
     @EnvironmentObject private var peerListModel: PeerListModel
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.appTheme) private var theme
+    @Environment(\.beaconShell) private var beaconShell
     @ThemedPalette private var palette
 
     @Binding var showSidebar: Bool
@@ -126,8 +127,10 @@ struct ContentHeaderView: View {
                     )
                 }
 
-                // Beacon button (mesh only), to the left of #mesh
-                if case .mesh = locationChannelsModel.selectedChannel {
+                // Beacon button (mesh only), to the left of #mesh.
+                // Suppressed inside the Beacon shell — the app IS Beacon there,
+                // a button to open it as a sheet would be redundant.
+                if beaconShell == nil, case .mesh = locationChannelsModel.selectedChannel {
                     Button(action: { showBeaconSheet = true }) {
                         BeaconIcon(size: 14)
                             .headerTapTarget()
@@ -138,7 +141,15 @@ struct ContentHeaderView: View {
                     )
                 }
 
-                Button(action: { appChromeModel.isLocationChannelsSheetPresented = true }) {
+                // Channel badge: opens the Beacon drawer inside the shell,
+                // the legacy sheet otherwise.
+                Button(action: {
+                    if let beaconShell {
+                        beaconShell.openDrawer()
+                    } else {
+                        appChromeModel.isLocationChannelsSheetPresented = true
+                    }
+                }) {
                     let badgeText: String = {
                         switch locationChannelsModel.selectedChannel {
                         case .mesh: return "#mesh"
@@ -204,6 +215,7 @@ struct ContentHeaderView: View {
             }
             .sheet(isPresented: $showBeaconSheet) {
                 BeaconView()
+                    .environmentObject(peerListModel)
             }
             .onAppear {
                 #if DEBUG
