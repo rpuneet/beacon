@@ -646,7 +646,7 @@ struct BeaconView: View {
         .frame(maxWidth: .infinity)
         .frame(height: favoritesSheetHeight, alignment: .top)
         .background(.ultraThinMaterial)
-        .clipShape(UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
+        .clipShape(TopRoundedShape(radius: 20))
         .onTapGesture { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { favoritesExpanded.toggle() } }
         .gesture(
             DragGesture(minimumDistance: 15)
@@ -791,4 +791,24 @@ struct BeaconView: View {
 struct FavoriteDisplayItem {
     let noiseKey: Data
     let nickname: String
+}
+
+/// Top-corners-only rounding, available on all deployment targets
+/// (UnevenRoundedRectangle needs iOS 16.4 / macOS 13.3).
+struct TopRoundedShape: Shape {
+    let radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+        path.addArc(center: CGPoint(x: rect.minX + radius, y: rect.minY + radius),
+                    radius: radius, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
+        path.addArc(center: CGPoint(x: rect.maxX - radius, y: rect.minY + radius),
+                    radius: radius, startAngle: .degrees(270), endAngle: .degrees(0), clockwise: false)
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
 }

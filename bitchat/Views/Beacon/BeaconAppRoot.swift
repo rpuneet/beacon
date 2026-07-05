@@ -84,7 +84,11 @@ struct BeaconAppRoot: View {
                 .frame(maxHeight: .infinity)
                 .shadow(color: .black.opacity(nav.isDrawerOpen ? 0.5 : 0), radius: 20, x: 4, y: 0)
                 .offset(x: (nav.isDrawerOpen ? 0 : -Self.drawerWidth - 20) + min(0, drawerDrag))
+                .animation(.spring(response: 0.3, dampingFraction: 0.88), value: drawerDrag)
         }
+        // Best-effort edge swipe: over the map, MKMapView's own pan recognizer
+        // may win the touch — the hamburger stays the primary affordance.
+        // Closing by drag always works (the drawer/scrim cover the map).
         .simultaneousGesture(
             DragGesture(minimumDistance: 20)
                 .updating($drawerDrag) { value, state, _ in

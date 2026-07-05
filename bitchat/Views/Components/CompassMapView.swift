@@ -57,6 +57,8 @@ struct CompassMapView: UIViewRepresentable {
         if recenterTrigger != context.coordinator.lastRecenterTrigger {
             context.coordinator.lastRecenterTrigger = recenterTrigger
             context.coordinator.lastFitCoords = nil
+            // Grace period so the next fit pass doesn't immediately cancel follow
+            context.coordinator.ignoreRefitUntil = Date().addingTimeInterval(3)
             mapView.setUserTrackingMode(.follow, animated: true)
             return
         }
@@ -110,12 +112,14 @@ struct CompassMapView: UIViewRepresentable {
         var parent: CompassMapView
         var lastFitCoords: [CLLocationCoordinate2D]?
         var lastRecenterTrigger = 0
+        var ignoreRefitUntil = Date.distantPast
 
         init(_ parent: CompassMapView) { self.parent = parent }
 
         /// Refit only when a coordinate was added/removed or moved > 50 m,
         /// so user pan/zoom isn't constantly overridden.
         func shouldRefit(for coords: [CLLocationCoordinate2D]) -> Bool {
+            if Date() < ignoreRefitUntil { return false }
             guard let last = lastFitCoords, last.count == coords.count else { return true }
             for (a, b) in zip(last, coords) {
                 if MKMapPoint(a).distance(to: MKMapPoint(b)) > 50 { return true }
