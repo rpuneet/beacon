@@ -53,9 +53,18 @@ struct BeaconChannelsView: View {
         }
         .onAppear {
             locationChannelsModel.enableAndRefresh()
-            locationChannelsModel.beginLiveRefresh()
+            // The drawer stays mounted (offset off-screen), so drive live
+            // refresh off open/close instead of view lifecycle.
+            if nav.isDrawerOpen { locationChannelsModel.beginLiveRefresh() }
         }
-        .onDisappear { locationChannelsModel.endLiveRefresh() }
+        .onChange(of: nav.isDrawerOpen) { isOpen in
+            if isOpen {
+                locationChannelsModel.enableAndRefresh()
+                locationChannelsModel.beginLiveRefresh()
+            } else {
+                locationChannelsModel.endLiveRefresh()
+            }
+        }
     }
 
     // MARK: - Rows
