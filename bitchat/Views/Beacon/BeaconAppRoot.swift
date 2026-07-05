@@ -48,6 +48,10 @@ struct BeaconAppRoot: View {
             // trips to the map.
             ZStack {
                 ContentView()
+                    .environment(\.beaconShell, BeaconShellBridge(
+                        openDrawer: { nav.isDrawerOpen = true },
+                        openMap: { nav.openMap() }
+                    ))
                     .opacity(nav.activePanel == .chat ? 1 : 0)
                     .allowsHitTesting(nav.activePanel == .chat)
 

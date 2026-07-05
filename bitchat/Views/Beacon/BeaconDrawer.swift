@@ -11,7 +11,6 @@ import SwiftUI
 struct BeaconDrawer: View {
     @ObservedObject var nav: BeaconNavModel
     @ObservedObject private var profile = BeaconProfile.shared
-    @EnvironmentObject private var locationChannelsModel: LocationChannelsModel
     @EnvironmentObject private var appChromeModel: AppChromeModel
     @EnvironmentObject private var peerListModel: PeerListModel
     @Environment(\.colorScheme) private var colorScheme
@@ -20,11 +19,6 @@ struct BeaconDrawer: View {
 
     private var textColor: Color {
         colorScheme == .dark ? .green : Color(red: 0, green: 0.5, blue: 0)
-    }
-
-    private var isMeshSelected: Bool {
-        if case .mesh = locationChannelsModel.selectedChannel { return true }
-        return false
     }
 
     var body: some View {
@@ -44,30 +38,8 @@ struct BeaconDrawer: View {
 
                     sectionTitle("channels")
 
-                    drawerRow(
-                        icon: "antenna.radiowaves.left.and.right",
-                        label: "#mesh",
-                        detail: peerListModel.connectedMeshPeerCount > 0 ? "\(peerListModel.connectedMeshPeerCount)" : nil,
-                        isActive: nav.activePanel == .chat && isMeshSelected
-                    ) {
-                        locationChannelsModel.select(.mesh)
-                        nav.openChat()
-                    }
-
-                    if case .location(let channel) = locationChannelsModel.selectedChannel {
-                        drawerRow(
-                            icon: "number",
-                            label: "#\(channel.geohash)",
-                            isActive: nav.activePanel == .chat
-                        ) {
-                            nav.openChat()
-                        }
-                    }
-
-                    drawerRow(icon: "globe", label: "location channels…", isActive: false) {
-                        nav.isDrawerOpen = false
-                        appChromeModel.isLocationChannelsSheetPresented = true
-                    }
+                    // The full location-channels experience, folded in
+                    BeaconChannelsView(nav: nav)
 
                     sectionTitle("beacon")
 
