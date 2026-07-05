@@ -29,6 +29,7 @@ struct BeaconSetupView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var name: String = ""
+    @State private var previewPop = false
 
     private var textColor: Color {
         colorScheme == .dark ? .green : Color(red: 0, green: 0.5, blue: 0)
@@ -39,11 +40,21 @@ struct BeaconSetupView: View {
     }
 
     var body: some View {
-        VStack(spacing: 28) {
-            Spacer()
+        VStack(spacing: 24) {
+            Spacer(minLength: 24)
+
+            // The product promise, said once, right here
+            VStack(spacing: 6) {
+                Text("beacon")
+                    .font(.bitchatSystem(size: 28, weight: .semibold, design: .monospaced))
+                    .foregroundColor(textColor)
+                Text("find your people. no internet needed.")
+                    .font(.bitchatSystem(size: 12, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
 
             // Live avatar preview
-            VStack(spacing: 12) {
+            VStack(spacing: 10) {
                 ZStack {
                     Circle()
                         .fill(profile.avatarColor)
@@ -54,9 +65,14 @@ struct BeaconSetupView: View {
                     Text(profile.avatarEmoji)
                         .font(.system(size: 44))
                 }
-                Text(trimmedName.isEmpty ? "anon" : trimmedName)
+                .scaleEffect(previewPop ? 1.08 : 1.0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: previewPop)
+                Text(trimmedName.isEmpty ? appChromeModel.nickname : trimmedName)
                     .font(.bitchatSystem(size: 16, weight: .semibold, design: .monospaced))
                     .foregroundColor(textColor)
+                Text("this is how friends see you on the map")
+                    .font(.bitchatSystem(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
             }
 
             VStack(alignment: .leading, spacing: 20) {
@@ -64,7 +80,7 @@ struct BeaconSetupView: View {
                     Text("name")
                         .font(.bitchatSystem(size: 12, design: .monospaced))
                         .foregroundColor(.secondary)
-                    TextField("anon", text: $name)
+                    TextField(appChromeModel.nickname, text: $name)
                         .font(.bitchatSystem(size: 16, design: .monospaced))
                         .textFieldStyle(.plain)
                         .autocorrectionDisabled()
@@ -80,15 +96,18 @@ struct BeaconSetupView: View {
                     Text("avatar")
                         .font(.bitchatSystem(size: 12, design: .monospaced))
                         .foregroundColor(.secondary)
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 8), spacing: 10) {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 8), spacing: 6) {
                         ForEach(BeaconProfile.emojiChoices, id: \.self) { emoji in
                             Text(emoji)
                                 .font(.system(size: 26))
-                                .frame(width: 36, height: 36)
-                                .background(
-                                    Circle().fill(profile.avatarEmoji == emoji ? profile.avatarColor.opacity(0.35) : Color.clear)
+                                .frame(width: 44, height: 44)
+                                .overlay(
+                                    Circle()
+                                        .stroke(profile.avatarEmoji == emoji ? profile.avatarColor : .clear, lineWidth: 2.5)
+                                        .padding(1)
                                 )
-                                .onTapGesture { profile.avatarEmoji = emoji }
+                                .contentShape(Circle())
+                                .onTapGesture { pick { profile.avatarEmoji = emoji } }
                         }
                     }
                 }
@@ -97,25 +116,29 @@ struct BeaconSetupView: View {
                     Text("color")
                         .font(.bitchatSystem(size: 12, design: .monospaced))
                         .foregroundColor(.secondary)
-                    HStack(spacing: 12) {
+                    HStack(spacing: 8) {
                         ForEach(BeaconProfile.palette, id: \.self) { hex in
                             Circle()
                                 .fill(Color(hex: hex))
-                                .frame(width: 30, height: 30)
+                                .frame(width: 34, height: 34)
                                 .overlay(
-                                    Circle().stroke(Color.white, lineWidth: profile.avatarColorHex == hex ? 3 : 0)
+                                    Circle()
+                                        .stroke(profile.avatarColorHex == hex ? profile.avatarColor : .clear, lineWidth: 2.5)
+                                        .padding(-4)
                                 )
-                                .onTapGesture { profile.avatarColorHex = hex }
+                                .frame(width: 44, height: 44)
+                                .contentShape(Circle())
+                                .onTapGesture { pick { profile.avatarColorHex = hex } }
                         }
                     }
                 }
             }
             .padding(.horizontal, 28)
 
-            Spacer()
+            Spacer(minLength: 24)
 
             Button(action: finishSetup) {
-                Text("start beaconing")
+                Text(trimmedName.isEmpty ? "start as \(appChromeModel.nickname)" : "start beaconing")
                     .font(.bitchatSystem(size: 16, weight: .semibold, design: .monospaced))
                     .foregroundColor(.black)
                     .frame(maxWidth: .infinity)
@@ -124,21 +147,26 @@ struct BeaconSetupView: View {
                     .cornerRadius(12)
             }
             .buttonStyle(.plain)
-            .disabled(trimmedName.isEmpty)
-            .opacity(trimmedName.isEmpty ? 0.5 : 1)
             .padding(.horizontal, 28)
             .padding(.bottom, 32)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background((colorScheme == .dark ? Color.black : Color.white).ignoresSafeArea())
-        .onAppear {
-            name = appChromeModel.nickname
-        }
+
+    }
+
+    /// Selection feels physical: preview pops, light haptic
+    private func pick(_ change: () -> Void) {
+        change()
+        previewPop = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { previewPop = false }
+        HapticManager.shared.impact(.light)
     }
 
     private func finishSetup() {
-        guard !trimmedName.isEmpty else { return }
-        appChromeModel.setNickname(trimmedName)
+        if !trimmedName.isEmpty {
+            appChromeModel.setNickname(trimmedName)
+        }
         profile.completeSetup()
     }
 }

@@ -13,6 +13,7 @@ struct BeaconDrawer: View {
     @ObservedObject private var profile = BeaconProfile.shared
     @EnvironmentObject private var locationChannelsModel: LocationChannelsModel
     @EnvironmentObject private var appChromeModel: AppChromeModel
+    @EnvironmentObject private var peerListModel: PeerListModel
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var showBeaconSettings = false
@@ -46,6 +47,7 @@ struct BeaconDrawer: View {
                     drawerRow(
                         icon: "antenna.radiowaves.left.and.right",
                         label: "#mesh",
+                        detail: peerListModel.connectedMeshPeerCount > 0 ? "\(peerListModel.connectedMeshPeerCount)" : nil,
                         isActive: nav.activePanel == .chat && isMeshSelected
                     ) {
                         locationChannelsModel.select(.mesh)
@@ -63,10 +65,8 @@ struct BeaconDrawer: View {
                     }
 
                     drawerRow(icon: "globe", label: "location channels…", isActive: false) {
-                        nav.openChat()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            appChromeModel.isLocationChannelsSheetPresented = true
-                        }
+                        nav.isDrawerOpen = false
+                        appChromeModel.isLocationChannelsSheetPresented = true
                     }
 
                     sectionTitle("beacon")
@@ -107,14 +107,21 @@ struct BeaconDrawer: View {
                 Text(profile.avatarEmoji)
                     .font(.system(size: 22))
             }
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(appChromeModel.nickname)
                     .font(.bitchatSystem(size: 15, weight: .semibold, design: .monospaced))
                     .foregroundColor(textColor)
                     .lineLimit(1)
-                Text("beacon")
-                    .font(.bitchatSystem(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(peerListModel.connectedMeshPeerCount > 0 ? Color.green : Color.secondary)
+                        .frame(width: 6, height: 6)
+                    Text(peerListModel.connectedMeshPeerCount > 0
+                         ? "\(peerListModel.connectedMeshPeerCount) nearby"
+                         : "searching…")
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
             }
         }
     }
@@ -128,7 +135,7 @@ struct BeaconDrawer: View {
             .padding(.bottom, 6)
     }
 
-    private func drawerRow(icon: String, label: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+    private func drawerRow(icon: String, label: String, detail: String? = nil, isActive: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: icon)
@@ -138,6 +145,11 @@ struct BeaconDrawer: View {
                     .font(.bitchatSystem(size: 14, design: .monospaced))
                     .lineLimit(1)
                 Spacer()
+                if let detail {
+                    Text(detail)
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
                 if isActive {
                     Circle().fill(textColor).frame(width: 6, height: 6)
                 }

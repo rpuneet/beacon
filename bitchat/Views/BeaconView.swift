@@ -14,6 +14,7 @@ struct BeaconView: View {
     /// a dismiss button (set by BeaconAppRoot).
     var isRootMode = false
     var onMenuTap: (() -> Void)? = nil
+    var onOpenChat: (() -> Void)? = nil
 
     @ObservedObject private var beaconService = BeaconService.shared
     @ObservedObject private var favoritesService = FavoritesPersistenceService.shared
@@ -25,6 +26,8 @@ struct BeaconView: View {
     @State private var selectedFavoriteKey: Data?
     @State private var showSettings = false
     @State private var showFullTracking = false
+    @State private var recenterTrigger = 0
+    @State private var favoritesExpanded = false
     @State private var mapRegion = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
         span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
@@ -36,22 +39,29 @@ struct BeaconView: View {
 
     private var isTracking: Bool { selectedFavoriteKey != nil }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            headerView
+    private var favoritesSheetHeight: CGFloat { favoritesExpanded ? 300 : 96 }
 
-            ZStack(alignment: .bottom) {
-                mapView
-                if locationManager.permissionState == .denied || locationManager.permissionState == .restricted {
-                    locationPermissionBanner
-                }
-                if let location = selectedLocation {
-                    trackingOverlay(location: location)
-                }
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            mapView
+                .ignoresSafeArea()
+
+            if locationManager.permissionState == .denied || locationManager.permissionState == .restricted {
+                locationPermissionBanner
             }
 
+            if let location = selectedLocation {
+                trackingOverlay(location: location)
+            } else {
+                favoritesSheet
+            }
+        }
+        .overlay(alignment: .top) {
+            headerView
+        }
+        .overlay(alignment: .bottomTrailing) {
             if !isTracking {
-                favoritesSection
+                recenterButton
             }
         }
         .background(colorScheme == .dark ? Color.black : Color.white)
@@ -128,27 +138,25 @@ struct BeaconView: View {
     // MARK: - Header
 
     private var headerView: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             if isRootMode {
                 Button(action: { onMenuTap?() }) {
                     Image(systemName: "line.3.horizontal")
                         .font(.system(size: 16, weight: .semibold))
-                        .frame(width: 28, height: 28)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(textColor)
             }
 
             Text("beacon")
-                .font(.bitchatSystem(size: 18, design: .monospaced))
+                .font(.bitchatSystem(size: 17, weight: .semibold, design: .monospaced))
                 .foregroundColor(textColor)
 
-            HStack(spacing: 6) {
-                if beaconService.peersWithLocationCount > 0 {
-                    Circle().fill(.green).frame(width: 6, height: 6)
-                }
-                Text("\(beaconService.peersWithLocationCount)/\(favoritesCount)")
-                    .font(.bitchatSystem(size: 12, design: .monospaced))
+            if favoritesCount > 0 {
+                Text("\(beaconService.peersWithLocationCount)/\(favoritesCount) located")
+                    .font(.bitchatSystem(size: 11, design: .monospaced))
                     .foregroundColor(.secondary)
             }
 
@@ -163,67 +171,83 @@ struct BeaconView: View {
                     }
                     .foregroundColor(.orange)
                     .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.orange.opacity(0.15))
-                    .cornerRadius(6)
+                    .frame(height: 24)
+                    .background(Color.orange.opacity(0.15), in: Capsule())
                 }
                 .buttonStyle(.plain)
             }
 
-            Spacer()
+            Spacer(minLength: 4)
 
-            // Beacon mode toggle (auto-ping every 10s)
+            // Beacon mode: a labeled state, never mystery iconography
             Button(action: { beaconService.isBeaconModeEnabled.toggle() }) {
-                HStack(spacing: 4) {
-                    Image(systemName: beaconService.isBeaconModeEnabled ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
-                        .font(.system(size: 14))
-                    if beaconService.isBeaconModeEnabled {
-                        Text("ON")
-                            .font(.bitchatSystem(size: 10, weight: .semibold, design: .monospaced))
-                    }
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(beaconService.isBeaconModeEnabled ? Color.green : Color.secondary.opacity(0.5))
+                        .frame(width: 7, height: 7)
+                    Text(beaconService.isBeaconModeEnabled ? "beaconing" : "off")
+                        .font(.bitchatSystem(size: 11, weight: .semibold, design: .monospaced))
                 }
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .background(
+                    beaconService.isBeaconModeEnabled ? Color.green.opacity(0.18) : Color.secondary.opacity(0.12),
+                    in: Capsule()
+                )
                 .foregroundColor(beaconService.isBeaconModeEnabled ? .green : .secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(beaconService.isBeaconModeEnabled ? Color.green.opacity(0.2) : Color.clear)
-                .cornerRadius(6)
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
 
-            // Manual ping button
+            // Manual ping
             Button(action: { beaconService.pingAllFavorites() }) {
-                if beaconService.isPinging {
-                    ProgressView().scaleEffect(0.7).frame(width: 28, height: 28)
-                } else {
-                    Image(systemName: "wave.3.right.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(textColor)
+                Group {
+                    if beaconService.isPinging {
+                        ProgressView().scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "wave.3.right.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(textColor)
+                    }
                 }
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(beaconService.isPinging)
-
-            // Privacy settings
-            Button(action: { showSettings = true }) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 14))
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(textColor)
 
             if !isRootMode {
                 Button(action: { dismiss() }) {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 28, height: 28)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(textColor)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .frame(height: 52)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
+    }
+
+    /// Snap the map back to the user after panning away
+    private var recenterButton: some View {
+        Button(action: { recenterTrigger += 1 }) {
+            Image(systemName: "location.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
+                .foregroundColor(textColor)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, 12)
+        .padding(.bottom, favoritesSheetHeight + 20)
     }
 
     // MARK: - Map
@@ -237,6 +261,7 @@ struct BeaconView: View {
                     annotations: mapAnnotations,
                     showsUserLocation: true,
                     fitCoordinates: fitCoordinatesForTracking,
+                    recenterTrigger: recenterTrigger,
                     onAnnotationTap: { key in
                         if selectedFavoriteKey == key {
                             stopTracking()
@@ -565,65 +590,140 @@ struct BeaconView: View {
         return myLoc.coordinate.bearing(to: peerCoord) - heading
     }
 
-    // MARK: - Favorites Section
+    // MARK: - Favorites Sheet
 
-    private var favoritesSection: some View {
+    /// Floating bottom sheet over the map: grabber, identity rows, and an
+    /// empty state that tells new users what to actually do.
+    private var favoritesSheet: some View {
         VStack(spacing: 0) {
+            Capsule()
+                .fill(Color.secondary.opacity(0.4))
+                .frame(width: 36, height: 5)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
+
             HStack {
-                Text("favorites")
-                    .font(.bitchatSystem(size: 14, weight: .medium, design: .monospaced))
+                Text("friends")
+                    .font(.bitchatSystem(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundColor(textColor)
                 Spacer()
-                Text("\(filteredFavorites.count)")
-                    .font(.bitchatSystem(size: 12, design: .monospaced))
-                    .foregroundColor(.secondary)
+                if !filteredFavorites.isEmpty {
+                    Text("\(filteredFavorites.count)")
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.bottom, 6)
 
-            Divider()
-
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    if filteredFavorites.isEmpty {
-                        Text("no mutual favorites")
-                            .font(.bitchatSystem(size: 13, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(16)
-                    } else {
+            if filteredFavorites.isEmpty {
+                emptyFavoritesState
+            } else if favoritesExpanded {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
                         ForEach(filteredFavorites, id: \.noiseKey) { fav in
                             favoriteRow(fav)
                         }
                     }
                 }
+            } else {
+                // Peek: avatar chips row
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(filteredFavorites, id: \.noiseKey) { fav in
+                            Button(action: { startTracking(fav.noiseKey) }) {
+                                identityBubble(nickname: fav.nickname, size: 34,
+                                               located: getLocation(for: fav.noiseKey)?.hasLocation == true)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .padding(.bottom, 12)
             }
-            .frame(height: 150)
         }
+        .frame(maxWidth: .infinity)
+        .frame(height: favoritesSheetHeight, alignment: .top)
+        .background(.ultraThinMaterial)
+        .clipShape(UnevenRoundedRectangle(topLeadingRadius: 20, topTrailingRadius: 20))
+        .onTapGesture { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { favoritesExpanded.toggle() } }
+        .gesture(
+            DragGesture(minimumDistance: 15)
+                .onEnded { value in
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                        favoritesExpanded = value.translation.height < 0
+                    }
+                }
+        )
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: favoritesExpanded)
+    }
+
+    private var emptyFavoritesState: some View {
+        VStack(spacing: 10) {
+            Text("friends appear here")
+                .font(.bitchatSystem(size: 13, design: .monospaced))
+            Text("favorite someone in chat — when they favorite you back, you can find each other")
+                .font(.bitchatSystem(size: 11, design: .monospaced))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            if isRootMode {
+                Button(action: { onOpenChat?() }) {
+                    Text("open #mesh")
+                        .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(textColor.opacity(0.15), in: Capsule())
+                        .foregroundColor(textColor)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.top, 6)
+        .padding(.bottom, 16)
+        .onAppear { favoritesExpanded = true }
+    }
+
+    /// One visual token per person: identity-colored circle with initial,
+    /// matching the map pin renderer.
+    private func identityBubble(nickname: String, size: CGFloat, located: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill(BeaconProfile.peerColor(nickname: nickname))
+                .frame(width: size, height: size)
+            Text(String(nickname.prefix(1)).uppercased())
+                .font(.bitchatSystem(size: size * 0.42, weight: .bold, design: .monospaced))
+                .foregroundColor(.white)
+        }
+        .overlay(
+            Circle().stroke(located ? Color.green : Color.secondary.opacity(0.4), lineWidth: 2)
+        )
+        .opacity(located ? 1 : 0.55)
     }
 
     private func favoriteRow(_ fav: FavoriteDisplayItem) -> some View {
         let location = getLocation(for: fav.noiseKey)
-        let hasLocation = location?.hasLocation == true
+        let located = location?.hasLocation == true
 
         return Button(action: { startTracking(fav.noiseKey) }) {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(hasLocation ? Color.green : Color.gray.opacity(0.3))
-                    .frame(width: 8, height: 8)
+            HStack(spacing: 12) {
+                identityBubble(nickname: fav.nickname, size: 32, located: located)
 
-                Text(fav.nickname)
-                    .font(.bitchatSystem(size: 13, design: .monospaced))
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(fav.nickname)
+                        .font(.bitchatSystem(size: 13, weight: .medium, design: .monospaced))
+                        .lineLimit(1)
+                    Text(proximityWord(for: location))
+                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .foregroundColor(located ? .green : .secondary)
+                }
 
                 Spacer()
 
-                if let loc = location, let rssi = loc.peerRSSI {
+                if let rssi = location?.peerRSSI {
                     Text("\(rssi)dBm")
-                        .font(.bitchatSystem(size: 11, design: .monospaced))
-                        .foregroundColor(.green)
-                } else {
-                    Text("—")
-                        .font(.bitchatSystem(size: 11, design: .monospaced))
+                        .font(.bitchatSystem(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
 
@@ -632,9 +732,25 @@ struct BeaconView: View {
                     .foregroundColor(.secondary)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Human word first; raw telemetry is the secondary detail
+    private func proximityWord(for location: PeerLocation?) -> String {
+        guard let location, location.hasLocation else { return "no location yet" }
+        switch proximityLevel(from: location) {
+        case .here: return "right here"
+        case .close: return "very close"
+        case .near: return "nearby"
+        case .far, .arrow:
+            if let seconds = location.timestamp.timeIntervalSinceNow as TimeInterval?, -seconds < 120 {
+                return "on the map"
+            }
+            return "on the map · a while ago"
+        }
     }
 
     // MARK: - Helpers
