@@ -144,6 +144,13 @@ struct CompassMapView: UIViewRepresentable {
                 view.setPulsing(parent.beaconing)
                 return view
             }
+            if let cluster = annotation as? MKClusterAnnotation {
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: "cluster") as? BeaconClusterView)
+                    ?? BeaconClusterView(annotation: annotation, reuseIdentifier: "cluster")
+                view.annotation = annotation
+                view.configure(count: cluster.memberAnnotations.count)
+                return view
+            }
             guard let beacon = annotation as? BeaconPointAnnotation else { return nil }
             let view = mapView.dequeueReusableAnnotationView(withIdentifier: "beacon", for: annotation) as! BeaconAnnotationView
             view.configure(with: beacon)
@@ -151,10 +158,28 @@ struct CompassMapView: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            // Tapping a cluster zooms in to spread its members apart
+            if let cluster = view.annotation as? MKClusterAnnotation {
+                let rect = cluster.memberAnnotations.reduce(MKMapRect.null) { r, ann in
+                    let p = MKMapPoint(ann.coordinate)
+                    return r.union(MKMapRect(x: p.x - 50, y: p.y - 50, width: 100, height: 100))
+                }
+                mapView.setVisibleMapRect(rect, edgePadding: UIEdgeInsets(top: 80, left: 60, bottom: 160, right: 60), animated: true)
+                mapView.deselectAnnotation(cluster, animated: false)
+                return
+            }
             guard let ann = view.annotation as? BeaconPointAnnotation,
                   let key = Data(hexString: ann.noiseKeyHex) else { return }
             parent.onAnnotationTap(key)
             mapView.deselectAnnotation(ann, animated: false)
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            // Mirror the real viewport back to the binding so off-screen
+            // indicators only appear for peers genuinely outside the map —
+            // not ones MapKit is already showing after an auto-fit.
+            let region = mapView.region
+            DispatchQueue.main.async { self.parent.region = region }
         }
     }
 }
@@ -183,6 +208,8 @@ class BeaconAnnotationView: MKAnnotationView {
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         canShowCallout = false
+        // Collapse overlapping peers (e.g. a crowded venue) into a count bubble
+        clusteringIdentifier = "beaconPeers"
         frame = CGRect(x: 0, y: 0, width: 88, height: 54)
         // Bubble center sits on the coordinate; the name hangs below
         centerOffset = CGPoint(x: 0, y: Self.bubbleSize / 2 - frame.height / 2)
@@ -219,6 +246,38 @@ class BeaconAnnotationView: MKAnnotationView {
         let textWidth = (name as NSString).size(withAttributes: [.font: nameChip.font!]).width + 16
         let chipWidth = min(textWidth, frame.width)
         nameChip.frame = CGRect(x: (frame.width - chipWidth) / 2, y: Self.bubbleSize + 4, width: chipWidth, height: 16)
+    }
+}
+
+/// A crowd: overlapping peers collapsed into one count bubble. Tapping it
+/// zooms in until the individual pins separate.
+final class BeaconClusterView: MKAnnotationView {
+    private static let size: CGFloat = 40
+    private let label = UILabel()
+
+    override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
+        super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
+        canShowCallout = false
+        frame = CGRect(x: 0, y: 0, width: Self.size, height: Self.size)
+        centerOffset = .zero
+
+        label.frame = bounds
+        label.textAlignment = .center
+        label.font = .monospacedSystemFont(ofSize: 15, weight: .bold)
+        label.textColor = .white
+        label.backgroundColor = UIColor.systemGreen.withAlphaComponent(0.92)
+        label.layer.cornerRadius = Self.size / 2
+        label.layer.borderWidth = 2.5
+        label.layer.borderColor = UIColor.white.cgColor
+        label.clipsToBounds = true
+        addSubview(label)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(count: Int) {
+        label.text = "\(count)"
+        displayPriority = .required   // never let a crowd get hidden behind a single pin
     }
 }
 

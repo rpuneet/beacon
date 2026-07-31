@@ -502,20 +502,65 @@ final class BeaconService: ObservableObject {
     /// Launch with `-beacon.screenshotMode`. Does not persist beyond process
     /// lifetime for locations; favorites are real UserDefaults writes so wipe
     /// the sim between demos if needed.
-    func installScreenshotDemoPeers(around coordinate: CLLocationCoordinate2D) {
+    private struct DemoPeer {
+        let name: String
+        let dLat: Double
+        let dLon: Double
+        let transport: PeerLocation.TransportType
+        let pingMs: Int
+        let rssi: Int?
+        let uwb: Float?   // simulated UWB distance (m) for Find-mode UX; nil = no UWB
+    }
+
+    /// The concert: most of your favorites are here in the venue (a tight BLE
+    /// cluster, a few already within UWB range) and some are across town on
+    /// relay/Nostr. Deterministic keys so re-runs don't pile up duplicates.
+    private static let demoScene: [DemoPeer] = [
+        // — inside the venue (6, BLE) — spread ~60–150m so pins stay readable —
+        DemoPeer(name: "maya", dLat:  0.00090, dLon:  0.00070, transport: .ble, pingMs: 22, rssi: -48, uwb: 3.2),
+        DemoPeer(name: "rio",  dLat: -0.00105, dLon:  0.00050, transport: .ble, pingMs: 28, rssi: -53, uwb: 7.8),
+        DemoPeer(name: "ash",  dLat: -0.00075, dLon: -0.00065, transport: .ble, pingMs: 31, rssi: -58, uwb: 12.6),
+        DemoPeer(name: "noa",  dLat: -0.00040, dLon:  0.00110, transport: .ble, pingMs: 26, rssi: -55, uwb: 5.1),
+        DemoPeer(name: "jun",  dLat:  0.00055, dLon: -0.00095, transport: .ble, pingMs: 40, rssi: -62, uwb: nil),
+        DemoPeer(name: "kai",  dLat:  0.00120, dLon: -0.00030, transport: .ble, pingMs: 45, rssi: -66, uwb: nil),
+        // — across town, over relay/Nostr (4) —
+        DemoPeer(name: "sam",  dLat:  0.0061,  dLon:  0.0042,  transport: .relay, pingMs: 180, rssi: nil, uwb: nil),
+        DemoPeer(name: "theo", dLat:  0.0039,  dLon: -0.0069,  transport: .relay, pingMs: 240, rssi: nil, uwb: nil),
+        DemoPeer(name: "zoe",  dLat: -0.0052,  dLon: -0.0048,  transport: .relay, pingMs: 210, rssi: nil, uwb: nil),
+        DemoPeer(name: "ivy",  dLat: -0.0075,  dLon:  0.0031,  transport: .relay, pingMs: 320, rssi: nil, uwb: nil),
+    ]
+
+    private var demoSceneInstalled = false
+    private var demoSeedAttempts = 0
+
+    private static func demoNoiseKey(_ index: Int) -> Data {
+        var keyBytes = [UInt8](repeating: 0xBE, count: 32)
+        keyBytes[31] = UInt8(index + 1)
+        return Data(keyBytes)
+    }
+
+    /// Seed the concert scene, merging alongside any real peers (e.g. a nearby
+    /// Mac). Retries until the device's real location is known so the pins land
+    /// around the user instead of a fallback city.
+    func installScreenshotDemoScene() {
         guard ProcessInfo.processInfo.arguments.contains("-beacon.screenshotMode") else { return }
-        guard peerLocations.isEmpty else { return }
+        guard !demoSceneInstalled else { return }
 
-        let demos: [(name: String, dLat: Double, dLon: Double, transport: PeerLocation.TransportType)] = [
-            ("maya", 0.0018, 0.0012, .ble),
-            ("rio", -0.0024, 0.0015, .ble),
-            ("jun", 0.0006, -0.0028, .relay),
-        ]
+        guard let coordinate = LocationStateManager.shared.currentLocation?.coordinate else {
+            demoSeedAttempts += 1
+            guard demoSeedAttempts <= 20 else {   // ~10s of 0.5s retries, then give up
+                SecureLogger.warning("[Beacon] Demo scene: no location after retries", category: .session)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.installScreenshotDemoScene()
+            }
+            return
+        }
 
-        for (index, demo) in demos.enumerated() {
-            var keyBytes = [UInt8](repeating: 0xBE, count: 32)
-            keyBytes[31] = UInt8(index + 1)
-            let noiseKey = Data(keyBytes)
+        demoSceneInstalled = true
+        for (index, demo) in Self.demoScene.enumerated() {
+            let noiseKey = Self.demoNoiseKey(index)
             let peerID = PeerID(publicKey: noiseKey)
 
             FavoritesPersistenceService.shared.addFavorite(
@@ -528,20 +573,35 @@ final class BeaconService: ObservableObject {
                 peerNickname: demo.name
             )
 
-            peerLocations[peerID.id] = PeerLocation(
+            var location = PeerLocation(
                 id: peerID.id,
                 latitude: coordinate.latitude + demo.dLat,
                 longitude: coordinate.longitude + demo.dLon,
                 altitude: 10,
-                horizontalAccuracy: 12,
+                horizontalAccuracy: demo.transport == .ble ? 12 : 65,
                 transport: demo.transport,
-                pingMs: 40 + index * 15,
-                peerRSSI: -55 - index * 8,
-                timestamp: Date().addingTimeInterval(Double(-index * 20))
+                pingMs: demo.pingMs,
+                peerRSSI: demo.rssi,
+                timestamp: Date().addingTimeInterval(Double(-index * 12))
             )
+            if let uwb = demo.uwb {
+                // Roughly forward-and-slightly-right so the Find-mode arrow points somewhere real
+                location.updateUWBDistance(uwb, direction: simd_float3(0.25, 0.0, -0.97))
+            }
+            peerLocations[peerID.id] = location
         }
         isBeaconModeEnabled = true
-        SecureLogger.info("[Beacon] Installed screenshot demo peers", category: .session)
+        SecureLogger.info("[Beacon] Installed concert demo scene (\(Self.demoScene.count) peers)", category: .session)
+    }
+
+    /// Remove the demo favorites + pins (launch with `-beacon.wipeDemo`).
+    func removeScreenshotDemoScene() {
+        for index in Self.demoScene.indices {
+            let noiseKey = Self.demoNoiseKey(index)
+            peerLocations.removeValue(forKey: PeerID(publicKey: noiseKey).id)
+            FavoritesPersistenceService.shared.removeFavorite(peerNoisePublicKey: noiseKey)
+        }
+        SecureLogger.info("[Beacon] Removed concert demo scene", category: .session)
     }
     #endif
 
