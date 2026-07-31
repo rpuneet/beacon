@@ -353,11 +353,26 @@ final class BeaconService: ObservableObject {
             transport: transport, pingMs: pingMs, peerRSSI: rssi, timestamp: Date()
         )
         // Carry over live UWB ranging so a GPS refresh doesn't blank it out
-        if let existing = peerLocations[peerID.id], let distance = existing.uwbDistance {
+        let existing = peerLocations[peerID.id]
+        if let existing, let distance = existing.uwbDistance {
             location.updateUWBDistance(distance, direction: existing.uwbDirection)
+        }
+        // Beacon-branded arrival alert: a mutual favorite just came into range
+        // (we had no live fix for them before). Announce once until they leave.
+        if existing?.hasLocation != true {
+            announceArrivalIfNeeded(noiseKey: noiseKey, peerID: peerID)
         }
         peerLocations[peerID.id] = location
         saveLastKnownLocations()
+    }
+
+    private var announcedNearby: Set<String> = []
+
+    private func announceArrivalIfNeeded(noiseKey: Data, peerID: PeerID) {
+        guard !ProcessInfo.processInfo.arguments.contains("-beacon.screenshotMode") else { return }
+        guard favoritesService.favorites[noiseKey]?.isMutual == true else { return }
+        guard announcedNearby.insert(peerID.id).inserted else { return }
+        NotificationService.shared.sendBeaconNearbyNotification(name: peerName(for: noiseKey), peerID: peerID)
     }
 
     // MARK: - Last-Known Location Persistence

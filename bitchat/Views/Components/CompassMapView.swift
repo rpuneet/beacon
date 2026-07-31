@@ -15,6 +15,8 @@ struct BeaconAnnotation: Identifiable {
     let nickname: String
     let coordinate: CLLocationCoordinate2D
     let transport: PeerLocation.TransportType
+    var distanceMeters: Double? = nil   // from the user; drives pin size
+    var isSelf: Bool = false            // the user's own avatar (macOS map)
     var id: String { noiseKey.hexEncodedString() }
 }
 
@@ -187,10 +189,12 @@ struct CompassMapView: UIViewRepresentable {
 class BeaconPointAnnotation: MKPointAnnotation {
     let noiseKeyHex: String
     var transport: PeerLocation.TransportType
+    var distanceMeters: Double?
 
     init(annotation: BeaconAnnotation) {
         self.noiseKeyHex = annotation.noiseKey.hexEncodedString()
         self.transport = annotation.transport
+        self.distanceMeters = annotation.distanceMeters
         super.init()
         self.coordinate = annotation.coordinate
         self.title = annotation.nickname
@@ -236,16 +240,30 @@ class BeaconAnnotationView: MKAnnotationView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Nearer peers read larger, far ones smaller — proximity at a glance.
+    /// Clamped so even distant pins stay tappable/legible.
+    static func scale(forDistance meters: Double?) -> CGFloat {
+        guard let meters else { return 1.0 }
+        let near = 50.0, far = 2000.0
+        let t = min(max((meters - near) / (far - near), 0), 1)  // 0 near … 1 far
+        return 1.15 - CGFloat(t) * 0.45                          // 1.15 … 0.70
+    }
+
     func configure(with annotation: BeaconPointAnnotation) {
         let name = annotation.title ?? "?"
+        let scale = Self.scale(forDistance: annotation.distanceMeters)
+        let s = Self.bubbleSize * scale
+        bubble.frame = CGRect(x: (frame.width - s) / 2, y: 0, width: s, height: s)
+        bubble.layer.cornerRadius = s / 2
+        bubble.font = .monospacedSystemFont(ofSize: 15 * scale, weight: .bold)
         bubble.text = String(name.prefix(1)).uppercased()
         bubble.backgroundColor = UIColor(BeaconProfile.peerColor(nickname: name))
         bubble.layer.borderColor = (annotation.transport == .ble ? UIColor.systemGreen : UIColor.systemPurple).cgColor
         nameChip.text = name
-        // Chip hugs the text instead of filling the 88pt frame
+        // Chip hugs the text and sits just under the (scaled) bubble
         let textWidth = (name as NSString).size(withAttributes: [.font: nameChip.font!]).width + 16
         let chipWidth = min(textWidth, frame.width)
-        nameChip.frame = CGRect(x: (frame.width - chipWidth) / 2, y: Self.bubbleSize + 4, width: chipWidth, height: 16)
+        nameChip.frame = CGRect(x: (frame.width - chipWidth) / 2, y: s + 3, width: chipWidth, height: 16)
     }
 }
 
@@ -294,6 +312,10 @@ final class SelfAnnotationView: MKAnnotationView {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         frame = CGRect(x: 0, y: 0, width: Self.avatarSize, height: Self.avatarSize)
         centerOffset = .zero
+        // You should always be able to find yourself — never hidden behind a
+        // peer pin or a venue cluster sitting on your location.
+        displayPriority = .required
+        layer.zPosition = 3000
 
         pulse.fillColor = UIColor.systemGreen.withAlphaComponent(0.30).cgColor
         pulse.strokeColor = UIColor.clear.cgColor
