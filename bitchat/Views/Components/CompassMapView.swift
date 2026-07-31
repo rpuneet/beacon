@@ -27,6 +27,7 @@ struct CompassMapView: UIViewRepresentable {
     let showsUserLocation: Bool
     let fitCoordinates: [CLLocationCoordinate2D]?  // Fit map to show these coordinates
     var recenterTrigger: Int = 0  // increment to snap back to the user
+    var beaconing: Bool = false  // pulse the user's own pin while sharing is live
     let onAnnotationTap: (Data) -> Void
 
     func makeUIView(context: Context) -> MKMapView {
@@ -53,6 +54,11 @@ struct CompassMapView: UIViewRepresentable {
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
         updateAnnotations(mapView: mapView)
+
+        // Keep the self-pin pulse in sync with sharing state
+        if let selfView = mapView.view(for: mapView.userLocation) as? SelfAnnotationView {
+            selfView.setPulsing(beaconing)
+        }
 
         if recenterTrigger != context.coordinator.lastRecenterTrigger {
             context.coordinator.lastRecenterTrigger = recenterTrigger
@@ -129,13 +135,13 @@ struct CompassMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if annotation is MKUserLocation {
-                // Own avatar instead of the default blue dot
+                // Own avatar instead of the default blue dot, with a live pulse
                 let identifier = "self-avatar"
-                let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
-                    ?? MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? SelfAnnotationView)
+                    ?? SelfAnnotationView(annotation: annotation, reuseIdentifier: identifier)
                 view.annotation = annotation
-                view.image = SelfAvatarRenderer.image()
-                view.centerOffset = .zero
+                view.refreshAvatar()
+                view.setPulsing(parent.beaconing)
                 return view
             }
             guard let beacon = annotation as? BeaconPointAnnotation else { return nil }
@@ -213,6 +219,66 @@ class BeaconAnnotationView: MKAnnotationView {
         let textWidth = (name as NSString).size(withAttributes: [.font: nameChip.font!]).width + 16
         let chipWidth = min(textWidth, frame.width)
         nameChip.frame = CGRect(x: (frame.width - chipWidth) / 2, y: Self.bubbleSize + 4, width: chipWidth, height: 16)
+    }
+}
+
+/// The local user's pin: their avatar with a soft green pulse radiating out
+/// while beaconing is live. The pulse is the app's one signature motion,
+/// mirrored on the "beaconing" chip in the header.
+final class SelfAnnotationView: MKAnnotationView {
+    private static let avatarSize: CGFloat = 36
+    private let avatar = UIImageView()
+    private let pulse = CAShapeLayer()
+    private var pulsing = false
+
+    override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
+        super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
+        frame = CGRect(x: 0, y: 0, width: Self.avatarSize, height: Self.avatarSize)
+        centerOffset = .zero
+
+        pulse.fillColor = UIColor.systemGreen.withAlphaComponent(0.30).cgColor
+        pulse.strokeColor = UIColor.clear.cgColor
+        pulse.opacity = 0
+        layer.addSublayer(pulse)          // behind the avatar
+
+        avatar.frame = bounds
+        avatar.contentMode = .scaleAspectFit
+        addSubview(avatar)                 // above the pulse layer
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @MainActor func refreshAvatar() {
+        avatar.image = SelfAvatarRenderer.image()
+    }
+
+    func setPulsing(_ on: Bool) {
+        guard on != pulsing else { return }
+        pulsing = on
+        if on {
+            let scale = CABasicAnimation(keyPath: "transform.scale")
+            scale.fromValue = 1.0
+            scale.toValue = 2.6
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0.5
+            fade.toValue = 0.0
+            let group = CAAnimationGroup()
+            group.animations = [scale, fade]
+            group.duration = 1.6
+            group.repeatCount = .infinity
+            group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            pulse.add(group, forKey: "beaconingPulse")
+        } else {
+            pulse.removeAnimation(forKey: "beaconingPulse")
+            pulse.opacity = 0
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        avatar.frame = bounds
+        pulse.frame = bounds
+        pulse.path = UIBezierPath(ovalIn: bounds).cgPath
     }
 }
 

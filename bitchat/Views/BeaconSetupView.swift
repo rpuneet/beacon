@@ -119,7 +119,7 @@ struct BeaconSetupView: View {
 
                 Text("this is how friends see you on the map")
                     .font(.bitchatSystem(size: 11, design: .monospaced))
-                    .foregroundColor(Color.primary.opacity(0.55))
+                    .foregroundColor(Color.primary.opacity(0.7))
             }
 
             VStack(alignment: .leading, spacing: 20) {

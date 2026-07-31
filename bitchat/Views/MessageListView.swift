@@ -224,7 +224,7 @@ private extension MessageListView {
                  ? "messages from nearby peers show up here"
                  : "favorite someone — when they favorite you back, they appear on the map")
                 .font(.bitchatSystem(size: 12, design: .monospaced))
-                .foregroundColor(Color.primary.opacity(0.5))
+                .foregroundColor(Color.primary.opacity(0.68))
                 .multilineTextAlignment(.center)
             if beaconShell != nil {
                 Button(action: { beaconShell?.openMap() }) {
