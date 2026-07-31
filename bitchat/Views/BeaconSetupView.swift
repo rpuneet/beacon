@@ -53,26 +53,73 @@ struct BeaconSetupView: View {
                     .foregroundColor(.secondary)
             }
 
-            // Live avatar preview
+            // Live avatar preview — shown as a map pin, matching the real product
             VStack(spacing: 10) {
                 ZStack {
-                    Circle()
-                        .fill(profile.avatarColor)
-                        .frame(width: 88, height: 88)
-                    Circle()
-                        .stroke(Color.white.opacity(0.9), lineWidth: 3)
-                        .frame(width: 88, height: 88)
-                    Text(profile.avatarEmoji)
-                        .font(.system(size: 44))
+                    // Mini map plane: the identity promise, not a floating circle
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: colorScheme == .dark
+                                    ? [Color(red: 0.08, green: 0.10, blue: 0.14), Color(red: 0.12, green: 0.14, blue: 0.20)]
+                                    : [Color(red: 0.90, green: 0.93, blue: 0.90), Color(red: 0.82, green: 0.88, blue: 0.84)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(height: 140)
+                        .overlay {
+                            // Soft street grid
+                            Canvas { context, size in
+                                let ink = colorScheme == .dark
+                                    ? Color.white.opacity(0.08)
+                                    : Color.black.opacity(0.06)
+                                for i in stride(from: 0.0, through: size.width, by: 28) {
+                                    var path = Path()
+                                    path.move(to: CGPoint(x: i, y: 0))
+                                    path.addLine(to: CGPoint(x: i, y: size.height))
+                                    context.stroke(path, with: .color(ink), lineWidth: 1)
+                                }
+                                for i in stride(from: 0.0, through: size.height, by: 28) {
+                                    var path = Path()
+                                    path.move(to: CGPoint(x: 0, y: i))
+                                    path.addLine(to: CGPoint(x: size.width, y: i))
+                                    context.stroke(path, with: .color(ink), lineWidth: 1)
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                        )
+
+                    VStack(spacing: 4) {
+                        ZStack {
+                            Circle()
+                                .fill(profile.avatarColor)
+                                .frame(width: 56, height: 56)
+                            Circle()
+                                .stroke(Color.white.opacity(0.9), lineWidth: 2.5)
+                                .frame(width: 56, height: 56)
+                            Text(profile.avatarEmoji)
+                                .font(.system(size: 28))
+                        }
+                        Text(trimmedName.isEmpty ? appChromeModel.nickname : trimmedName)
+                            .font(.bitchatSystem(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(0.65), in: Capsule())
+                    }
+                    .scaleEffect(previewPop ? 1.08 : 1.0)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.6), value: previewPop)
                 }
-                .scaleEffect(previewPop ? 1.08 : 1.0)
-                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: previewPop)
-                Text(trimmedName.isEmpty ? appChromeModel.nickname : trimmedName)
-                    .font(.bitchatSystem(size: 16, weight: .semibold, design: .monospaced))
-                    .foregroundColor(textColor)
+                .padding(.horizontal, 28)
+
                 Text("this is how friends see you on the map")
                     .font(.bitchatSystem(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Color.primary.opacity(0.55))
             }
 
             VStack(alignment: .leading, spacing: 20) {
@@ -168,5 +215,10 @@ struct BeaconSetupView: View {
             appChromeModel.setNickname(trimmedName)
         }
         profile.completeSetup()
+        // Product is called Beacon — leave setup already beaconing, with
+        // sharing on (fail-closed mutual-favorites still applies).
+        BeaconSettings.shared.isSharingEnabled = true
+        BeaconService.shared.isBeaconModeEnabled = true
+        HapticManager.shared.impact(.medium)
     }
 }
