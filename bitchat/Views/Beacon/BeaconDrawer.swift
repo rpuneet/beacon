@@ -11,6 +11,7 @@ import SwiftUI
 struct BeaconDrawer: View {
     @ObservedObject var nav: BeaconNavModel
     @ObservedObject private var profile = BeaconProfile.shared
+    @ObservedObject private var favorites = FavoritesPersistenceService.shared
     @EnvironmentObject private var appChromeModel: AppChromeModel
     @EnvironmentObject private var peerListModel: PeerListModel
     @Environment(\.colorScheme) private var colorScheme
@@ -39,6 +40,10 @@ struct BeaconDrawer: View {
                     // People & privacy first — geohash channels are secondary
                     sectionTitle("beacon")
 
+                    drawerRow(icon: "person.2", label: "friends", detail: friendsDetail, isActive: false) {
+                        nav.openMap()
+                    }
+
                     drawerRow(icon: "shield", label: "privacy & sharing", isActive: false) {
                         showBeaconSettings = true
                     }
@@ -55,7 +60,7 @@ struct BeaconDrawer: View {
 
             Text("beacon · mesh + location")
                 .font(.bitchatSystem(size: 10, design: .monospaced))
-                .foregroundColor(Color.primary.opacity(0.45))
+                .foregroundColor(Color.primary.opacity(0.6))
                 .padding(18)
         }
         .frame(maxHeight: .infinity, alignment: .top)
@@ -97,6 +102,12 @@ struct BeaconDrawer: View {
                 }
             }
         }
+    }
+
+    /// Mutual favorites are the people you can actually see on the map.
+    private var friendsDetail: String {
+        let n = favorites.mutualFavorites.count
+        return n == 0 ? "none yet" : "\(n)"
     }
 
     private func sectionTitle(_ title: String) -> some View {

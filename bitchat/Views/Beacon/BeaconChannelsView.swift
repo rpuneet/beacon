@@ -99,7 +99,7 @@ struct BeaconChannelsView: View {
                 ForEach(nearby) { channel in
                     channelRow(
                         icon: "number",
-                        label: channel.level.displayName,
+                        label: placeTitle(for: channel),
                         sublabel: placeCaption(for: channel),
                         count: peerListModel.participantCount(for: channel.geohash),
                         accent: textColor,
@@ -246,9 +246,19 @@ struct BeaconChannelsView: View {
 
     // MARK: - Building blocks
 
-    /// People-first caption: level name is the row title; geohash stays secondary.
+    /// Place name is the row title once we've reverse-geocoded one; until then
+    /// the level name (block/neighborhood/…) leads and the geohash is secondary.
+    private func placeTitle(for channel: GeohashChannel) -> String {
+        locationChannelsModel.locationName(for: channel.level) ?? channel.level.displayName
+    }
+
+    /// Geohash is always secondary. When a place name leads the row, keep the
+    /// level word here too so the hierarchy stays legible.
     private func placeCaption(for channel: GeohashChannel) -> String {
-        "#\(channel.geohash)"
+        if locationChannelsModel.locationName(for: channel.level) != nil {
+            return "\(channel.level.displayName) · #\(channel.geohash)"
+        }
+        return "#\(channel.geohash)"
     }
 
     private func isSelected(_ channel: GeohashChannel) -> Bool {

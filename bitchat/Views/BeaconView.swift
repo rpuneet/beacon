@@ -29,6 +29,7 @@ struct BeaconView: View {
     @State private var showFullTracking = false
     @State private var recenterTrigger = 0
     @State private var favoritesExpanded = false
+    @State private var beaconingPulse = false
     @State private var mapRegion = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
         span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
@@ -44,6 +45,37 @@ struct BeaconView: View {
     private var favoritesSheetHeight: CGFloat {
         if filteredFavorites.isEmpty && nearbyPeople.isEmpty { return 118 }
         return favoritesExpanded ? 380 : 96
+    }
+
+    /// A soft outward pulse while sharing is live; a still dot when off.
+    /// This is the app's one signature motion — mirrored on the map pin.
+    private var beaconingDot: some View {
+        let on = beaconService.isBeaconModeEnabled
+        return ZStack {
+            if on {
+                Circle()
+                    .stroke(Color.green, lineWidth: 1.5)
+                    .frame(width: 7, height: 7)
+                    .scaleEffect(beaconingPulse ? 2.4 : 1.0)
+                    .opacity(beaconingPulse ? 0 : 0.7)
+            }
+            Circle()
+                .fill(on ? Color.green : Color.secondary.opacity(0.5))
+                .frame(width: 7, height: 7)
+        }
+        .onAppear { syncBeaconingPulse(on) }
+        .onChange(of: beaconService.isBeaconModeEnabled) { syncBeaconingPulse($0) }
+    }
+
+    private func syncBeaconingPulse(_ on: Bool) {
+        if on {
+            beaconingPulse = false
+            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
+                beaconingPulse = true
+            }
+        } else {
+            beaconingPulse = false
+        }
     }
 
     var body: some View {
@@ -187,9 +219,7 @@ struct BeaconView: View {
             // Beacon mode: a labeled state, never mystery iconography
             Button(action: { beaconService.isBeaconModeEnabled.toggle() }) {
                 HStack(spacing: 5) {
-                    Circle()
-                        .fill(beaconService.isBeaconModeEnabled ? Color.green : Color.secondary.opacity(0.5))
-                        .frame(width: 7, height: 7)
+                    beaconingDot
                     Text(beaconService.isBeaconModeEnabled ? "beaconing" : "off")
                         .font(.bitchatSystem(size: 11, weight: .semibold, design: .monospaced))
                 }
@@ -267,6 +297,7 @@ struct BeaconView: View {
                     showsUserLocation: true,
                     fitCoordinates: fitCoordinatesForTracking,
                     recenterTrigger: recenterTrigger,
+                    beaconing: beaconService.isBeaconModeEnabled,
                     onAnnotationTap: { key in
                         if selectedFavoriteKey == key {
                             stopTracking()
@@ -760,7 +791,7 @@ struct BeaconView: View {
                     .foregroundColor(textColor)
                 Text("favorite someone in chat — mutual favorites show up on the map")
                     .font(.bitchatSystem(size: 11, design: .monospaced))
-                    .foregroundColor(Color.primary.opacity(0.55))
+                    .foregroundColor(Color.primary.opacity(0.7))
                     .lineLimit(2)
             }
             Spacer(minLength: 4)
