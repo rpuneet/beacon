@@ -100,7 +100,7 @@ struct BeaconChannelsView: View {
                     channelRow(
                         icon: "number",
                         label: channel.level.displayName,
-                        sublabel: "#\(channel.geohash)",
+                        sublabel: placeCaption(for: channel),
                         count: peerListModel.participantCount(for: channel.geohash),
                         accent: textColor,
                         isSelected: isSelected(channel) && nav.activePanel == .chat,
@@ -245,6 +245,11 @@ struct BeaconChannelsView: View {
     }
 
     // MARK: - Building blocks
+
+    /// People-first caption: level name is the row title; geohash stays secondary.
+    private func placeCaption(for channel: GeohashChannel) -> String {
+        "#\(channel.geohash)"
+    }
 
     private func isSelected(_ channel: GeohashChannel) -> Bool {
         if case .location(let sel) = locationChannelsModel.selectedChannel { return sel.geohash == channel.geohash }

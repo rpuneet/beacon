@@ -497,4 +497,52 @@ final class BeaconService: ObservableObject {
         peerLocations.values.filter { $0.hasLocation }.count
     }
 
+    #if DEBUG
+    /// Seed mutual favorites + map pins for screenshot / UX review runs.
+    /// Launch with `-beacon.screenshotMode`. Does not persist beyond process
+    /// lifetime for locations; favorites are real UserDefaults writes so wipe
+    /// the sim between demos if needed.
+    func installScreenshotDemoPeers(around coordinate: CLLocationCoordinate2D) {
+        guard ProcessInfo.processInfo.arguments.contains("-beacon.screenshotMode") else { return }
+        guard peerLocations.isEmpty else { return }
+
+        let demos: [(name: String, dLat: Double, dLon: Double, transport: PeerLocation.TransportType)] = [
+            ("maya", 0.0018, 0.0012, .ble),
+            ("rio", -0.0024, 0.0015, .ble),
+            ("jun", 0.0006, -0.0028, .relay),
+        ]
+
+        for (index, demo) in demos.enumerated() {
+            var keyBytes = [UInt8](repeating: 0xBE, count: 32)
+            keyBytes[31] = UInt8(index + 1)
+            let noiseKey = Data(keyBytes)
+            let peerID = PeerID(publicKey: noiseKey)
+
+            FavoritesPersistenceService.shared.addFavorite(
+                peerNoisePublicKey: noiseKey,
+                peerNickname: demo.name
+            )
+            FavoritesPersistenceService.shared.updatePeerFavoritedUs(
+                peerNoisePublicKey: noiseKey,
+                favorited: true,
+                peerNickname: demo.name
+            )
+
+            peerLocations[peerID.id] = PeerLocation(
+                id: peerID.id,
+                latitude: coordinate.latitude + demo.dLat,
+                longitude: coordinate.longitude + demo.dLon,
+                altitude: 10,
+                horizontalAccuracy: 12,
+                transport: demo.transport,
+                pingMs: 40 + index * 15,
+                peerRSSI: -55 - index * 8,
+                timestamp: Date().addingTimeInterval(Double(-index * 20))
+            )
+        }
+        isBeaconModeEnabled = true
+        SecureLogger.info("[Beacon] Installed screenshot demo peers", category: .session)
+    }
+    #endif
+
 }

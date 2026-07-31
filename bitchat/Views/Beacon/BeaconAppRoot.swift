@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import CoreLocation
 
 @MainActor
 final class BeaconNavModel: ObservableObject {
@@ -120,6 +121,11 @@ struct BeaconAppRoot: View {
             }
             if args.contains("-beacon.openChat") {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { nav.openChat() }
+            }
+            if args.contains("-beacon.screenshotMode") {
+                let coord = LocationStateManager.shared.currentLocation?.coordinate
+                    ?? CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
+                BeaconService.shared.installScreenshotDemoPeers(around: coord)
             }
             #endif
         }

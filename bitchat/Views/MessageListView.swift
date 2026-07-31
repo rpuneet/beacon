@@ -22,6 +22,7 @@ struct MessageListView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appTheme) private var theme
+    @Environment(\.beaconShell) private var beaconShell
 
     let privatePeer: PeerID?
     @Binding var isAtBottom: Bool
@@ -66,6 +67,11 @@ struct MessageListView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    if messageItems.isEmpty {
+                        chatEmptyState
+                            .padding(.top, 48)
+                            .padding(.horizontal, 24)
+                    }
                     ForEach(messageItems) { item in
                         let message = item.message
                         messageRow(for: message)
@@ -208,6 +214,34 @@ struct MessageListView: View {
 }
 
 private extension MessageListView {
+    @ViewBuilder
+    var chatEmptyState: some View {
+        VStack(spacing: 10) {
+            Text(beaconShell == nil ? "no messages yet" : "say hi on the mesh")
+                .font(.bitchatSystem(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundColor(Color.primary.opacity(0.7))
+            Text(beaconShell == nil
+                 ? "messages from nearby peers show up here"
+                 : "favorite someone — when they favorite you back, they appear on the map")
+                .font(.bitchatSystem(size: 12, design: .monospaced))
+                .foregroundColor(Color.primary.opacity(0.5))
+                .multilineTextAlignment(.center)
+            if beaconShell != nil {
+                Button(action: { beaconShell?.openMap() }) {
+                    Text("back to map")
+                        .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.green.opacity(0.15), in: Capsule())
+                        .foregroundColor(.green)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
     @ViewBuilder
     func messageRow(for message: BitchatMessage) -> some View {
         Group {

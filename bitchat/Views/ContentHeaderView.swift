@@ -26,7 +26,7 @@ struct ContentHeaderView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Text(verbatim: "bitchat/")
+            Text(verbatim: beaconShell == nil ? "bitchat/" : "beacon/")
                 .bitchatFont(size: 18, weight: .medium)
                 .foregroundColor(palette.primary)
                 .onTapGesture(count: 3) {

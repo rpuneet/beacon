@@ -40,7 +40,11 @@ struct BeaconView: View {
 
     private var isTracking: Bool { selectedFavoriteKey != nil }
 
-    private var favoritesSheetHeight: CGFloat { favoritesExpanded ? 380 : 96 }
+    /// Empty "who's around" stays compact so the map remains the product.
+    private var favoritesSheetHeight: CGFloat {
+        if filteredFavorites.isEmpty && nearbyPeople.isEmpty { return 118 }
+        return favoritesExpanded ? 380 : 96
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -619,7 +623,7 @@ struct BeaconView: View {
             .padding(.bottom, 6)
 
             if filteredFavorites.isEmpty && nearbyPeople.isEmpty {
-                emptyFavoritesState
+                emptyFavoritesPeek
             } else if favoritesExpanded {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
@@ -746,20 +750,25 @@ struct BeaconView: View {
         .buttonStyle(.plain)
     }
 
-    private var emptyFavoritesState: some View {
-        VStack(spacing: 10) {
-            Text("friends appear here")
-                .font(.bitchatSystem(size: 13, design: .monospaced))
-            Text("favorite someone in chat — when they favorite you back, you can find each other")
-                .font(.bitchatSystem(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
+    /// Compact empty peek — never covers the map. Teaches mutual favorites
+    /// without expanding into a half-screen dead end.
+    private var emptyFavoritesPeek: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("friends appear here")
+                    .font(.bitchatSystem(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundColor(textColor)
+                Text("favorite someone in chat — mutual favorites show up on the map")
+                    .font(.bitchatSystem(size: 11, design: .monospaced))
+                    .foregroundColor(Color.primary.opacity(0.55))
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 4)
             if isRootMode {
                 Button(action: { onOpenChat?() }) {
                     Text("open #mesh")
                         .font(.bitchatSystem(size: 12, weight: .semibold, design: .monospaced))
-                        .padding(.horizontal, 14)
+                        .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(textColor.opacity(0.15), in: Capsule())
                         .foregroundColor(textColor)
@@ -767,9 +776,8 @@ struct BeaconView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.top, 6)
-        .padding(.bottom, 16)
-        .onAppear { favoritesExpanded = true }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 14)
     }
 
     /// One visual token per person: identity-colored circle with initial,

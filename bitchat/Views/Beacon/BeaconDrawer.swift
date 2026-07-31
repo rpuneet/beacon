@@ -36,25 +36,26 @@ struct BeaconDrawer: View {
                         nav.openMap()
                     }
 
-                    sectionTitle("channels")
-
-                    // The full location-channels experience, folded in
-                    BeaconChannelsView(nav: nav)
-
+                    // People & privacy first — geohash channels are secondary
                     sectionTitle("beacon")
 
                     drawerRow(icon: "shield", label: "privacy & sharing", isActive: false) {
                         showBeaconSettings = true
                     }
+
+                    sectionTitle("channels")
+
+                    // The full location-channels experience, folded in
+                    BeaconChannelsView(nav: nav)
                 }
                 .padding(.vertical, 12)
             }
 
             Spacer(minLength: 0)
 
-            Text("beacon · bitchat mesh")
+            Text("beacon · mesh + location")
                 .font(.bitchatSystem(size: 10, design: .monospaced))
-                .foregroundColor(.secondary)
+                .foregroundColor(Color.primary.opacity(0.45))
                 .padding(18)
         }
         .frame(maxHeight: .infinity, alignment: .top)
