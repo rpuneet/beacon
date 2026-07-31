@@ -80,3 +80,6 @@ build.log
 
 # Local configs
 Local.xcconfig
+
+# Local agent MCP server config (workspace-specific)
+.mcp.json
