@@ -17,6 +17,7 @@ struct BeaconDrawer: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var showBeaconSettings = false
+    @State private var showFriends = false
 
     private var textColor: Color {
         colorScheme == .dark ? .green : Color(red: 0, green: 0.5, blue: 0)
@@ -41,7 +42,7 @@ struct BeaconDrawer: View {
                     sectionTitle("beacon")
 
                     drawerRow(icon: "person.2", label: "friends", detail: friendsDetail, isActive: false) {
-                        nav.openMap()
+                        showFriends = true
                     }
 
                     drawerRow(icon: "shield", label: "privacy & sharing", isActive: false) {
@@ -73,6 +74,10 @@ struct BeaconDrawer: View {
         }
         .sheet(isPresented: $showBeaconSettings) {
             BeaconSettingsView()
+        }
+        .sheet(isPresented: $showFriends) {
+            BeaconFriendsView(nav: nav)
+                .environmentObject(peerListModel)
         }
     }
 

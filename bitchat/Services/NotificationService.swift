@@ -164,6 +164,17 @@ final class NotificationService {
         sendLocalNotification(title: title, body: body, identifier: identifier, userInfo: userInfo)
     }
     
+    /// Beacon-branded proximity alert: a mutual favorite came into range /
+    /// arrived. Deep-links to their pin on the map.
+    func sendBeaconNearbyNotification(name: String, peerID: PeerID) {
+        let title = "📡 Beacon"
+        let body = "\(name) is nearby"
+        // Stable per-peer id so a re-arrival replaces the old alert, not stacks
+        let identifier = "beacon-nearby-\(peerID.id)"
+        let userInfo: [String: Any] = ["peerID": peerID.id, "beaconEvent": "nearby"]
+        sendLocalNotification(title: title, body: body, identifier: identifier, userInfo: userInfo)
+    }
+
     // Geohash public chat notification with deep link to a specific geohash
     func sendGeohashActivityNotification(geohash: String, titlePrefix: String = "#", bodyPreview: String) {
         let title = "\(titlePrefix)\(geohash)"

@@ -307,33 +307,42 @@ struct BeaconView: View {
                     }
                 )
                 #else
-                Map(coordinateRegion: $mapRegion, showsUserLocation: true, annotationItems: mapAnnotations) { item in
+                Map(coordinateRegion: $mapRegion, showsUserLocation: false, annotationItems: macAnnotations) { item in
                     MapAnnotation(coordinate: item.coordinate) {
-                        VStack(spacing: 4) {
-                            Circle()
-                                .fill(BeaconProfile.peerColor(nickname: item.nickname))
-                                .frame(width: 28, height: 28)
-                                .overlay(
-                                    Text(String(item.nickname.prefix(1)).uppercased())
-                                        .font(.bitchatSystem(size: 13, weight: .bold, design: .monospaced))
-                                        .foregroundColor(.white)
-                                )
-                                .overlay(
-                                    Circle().stroke(item.transport == .ble ? Color.green : Color.purple, lineWidth: 2)
-                                )
-                            Text(item.nickname)
-                                .font(.bitchatSystem(size: 10, weight: .semibold, design: .monospaced))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.black.opacity(0.65))
-                                .cornerRadius(8)
-                        }
-                        .onTapGesture {
-                            if selectedFavoriteKey == item.noiseKey {
-                                stopTracking()
-                            } else {
-                                startTracking(item.noiseKey)
+                        if item.isSelf {
+                            // The user's own avatar instead of a blue dot
+                            ZStack {
+                                Circle().fill(BeaconProfile.shared.avatarColor).frame(width: 30, height: 30)
+                                Circle().stroke(Color.white.opacity(0.9), lineWidth: 2.5).frame(width: 30, height: 30)
+                                Text(BeaconProfile.shared.avatarEmoji).font(.system(size: 15))
+                            }
+                        } else {
+                            VStack(spacing: 4) {
+                                Circle()
+                                    .fill(BeaconProfile.peerColor(nickname: item.nickname))
+                                    .frame(width: 28, height: 28)
+                                    .overlay(
+                                        Text(String(item.nickname.prefix(1)).uppercased())
+                                            .font(.bitchatSystem(size: 13, weight: .bold, design: .monospaced))
+                                            .foregroundColor(.white)
+                                    )
+                                    .overlay(
+                                        Circle().stroke(item.transport == .ble ? Color.green : Color.purple, lineWidth: 2)
+                                    )
+                                Text(item.nickname)
+                                    .font(.bitchatSystem(size: 10, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.black.opacity(0.65))
+                                    .cornerRadius(8)
+                            }
+                            .onTapGesture {
+                                if selectedFavoriteKey == item.noiseKey {
+                                    stopTracking()
+                                } else {
+                                    startTracking(item.noiseKey)
+                                }
                             }
                         }
                     }
@@ -424,11 +433,33 @@ struct BeaconView: View {
     }
 
     private var mapAnnotations: [BeaconAnnotation] {
-        filteredFavorites.compactMap { fav in
+        let myCoord = locationManager.currentLocation?.coordinate
+        return filteredFavorites.compactMap { fav in
             guard let loc = getLocation(for: fav.noiseKey), let coord = loc.coordinate else { return nil }
-            return BeaconAnnotation(noiseKey: fav.noiseKey, nickname: fav.nickname, coordinate: coord, transport: loc.transport)
+            let distance = myCoord.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude)
+                .distance(from: CLLocation(latitude: coord.latitude, longitude: coord.longitude)) }
+            return BeaconAnnotation(noiseKey: fav.noiseKey, nickname: fav.nickname, coordinate: coord,
+                                    transport: loc.transport, distanceMeters: distance)
         }
     }
+
+    #if os(macOS)
+    /// macOS Map can't customise the system user-location dot, so we draw our
+    /// own avatar as an extra annotation instead of the default blue dot.
+    private var macAnnotations: [BeaconAnnotation] {
+        var items = mapAnnotations
+        if let coord = locationManager.currentLocation?.coordinate {
+            items.append(BeaconAnnotation(
+                noiseKey: Data([0xEE]),           // sentinel: the local user
+                nickname: "you",
+                coordinate: coord,
+                transport: .ble,
+                isSelf: true
+            ))
+        }
+        return items
+    }
+    #endif
 
     /// Coordinates the map should scale to show: user + tracked peer while
     /// tracking, or user + all located peers while browsing.
@@ -505,29 +536,23 @@ struct BeaconView: View {
                     .font(.bitchatSystem(size: 14, weight: .semibold, design: .monospaced))
                     .foregroundColor(textColor)
 
-                // RSSI / GPS info
-                HStack(spacing: 8) {
-                    if let rssi = location.peerRSSI {
-                        Text("\(rssi)dBm").foregroundColor(.green)
+                // Human-readable status: how far, how fresh — no raw telemetry
+                HStack(spacing: 6) {
+                    Text(friendlyDistance(location))
+                        .foregroundColor(textColor)
+                    if let freshness = freshnessLabel(location) {
+                        Text("·").foregroundColor(.secondary)
+                        Text(freshness).foregroundColor(.secondary)
                     }
-                    if let acc = location.horizontalAccuracy {
-                        Text("±\(Int(acc))m").foregroundColor(.orange)
-                    }
-                    Text("\(Int(Date().timeIntervalSince(location.timestamp)))s ago")
-                        .foregroundColor(.secondary)
                 }
                 .font(.bitchatSystem(size: 11, design: .monospaced))
+
+                Text("tap to find")
+                    .font(.bitchatSystem(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
             }
 
             Spacer()
-
-            // Expand into full-screen Find mode (compass + UWB + haptics)
-            Button(action: { showFullTracking = true }) {
-                Image(systemName: "arrow.up.left.and.arrow.down.right.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundColor(textColor)
-            }
-            .buttonStyle(.plain)
 
             Button(action: stopTracking) {
                 Image(systemName: "xmark.circle.fill")
@@ -541,6 +566,39 @@ struct BeaconView: View {
         .cornerRadius(16)
         .padding(.horizontal, 16)
         .padding(.bottom, 16)
+        // One tap on the card opens full Find mode (compass + UWB) — no
+        // separate expand button to hunt for
+        .contentShape(Rectangle())
+        .onTapGesture { showFullTracking = true }
+    }
+
+    /// How far the friend is, in words — UWB metres if we're ranging, else GPS
+    /// distance, else a signal-strength band. Never raw dBm.
+    private func friendlyDistance(_ location: PeerLocation) -> String {
+        if let uwb = location.uwbDistance {
+            return uwb < 1 ? "right here" : "\(Int(uwb.rounded())) m away"
+        }
+        if let myLoc = locationManager.currentLocation, let coord = location.coordinate {
+            let d = myLoc.distance(from: CLLocation(latitude: coord.latitude, longitude: coord.longitude))
+            if d < 15 { return "right here" }
+            if d < 1000 { return "\(Int((d / 10).rounded()) * 10) m away" }
+            return String(format: "%.1f km away", d / 1000)
+        }
+        if let rssi = location.peerRSSI {
+            if rssi > -50 { return "very close" }
+            if rssi > -65 { return "nearby" }
+            if rssi > -75 { return "in range" }
+            return "far"
+        }
+        return "locating…"
+    }
+
+    /// Only surface staleness when it matters — a live fix needs no timestamp.
+    private func freshnessLabel(_ location: PeerLocation) -> String? {
+        let age = Int(Date().timeIntervalSince(location.timestamp))
+        if age < 20 { return nil }
+        if age < 120 { return "\(age)s ago" }
+        return "\(age / 60)m ago"
     }
 
     private func proximityView(location: PeerLocation) -> some View {
