@@ -199,11 +199,6 @@ struct TrackingView: View {
                             .foregroundColor(.cyan)
                     }
 
-                    if let rssi = peerLocation.peerRSSI {
-                        Text("Signal: \(rssi) dBm")
-                            .font(.caption2)
-                            .foregroundColor(.gray)
-                    }
                 }
                 .padding(.bottom, 60)
             }

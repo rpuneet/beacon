@@ -13,11 +13,13 @@ import XCTest
 final class BeaconPrivacyTests: XCTestCase {
 
     private var defaults: UserDefaults!
-    private let suiteName = "BeaconPrivacyTests"
+    private var suiteName = ""
 
     override func setUp() {
         super.setUp()
-        defaults = UserDefaults(suiteName: suiteName)
+        // Unique suite per test so parallel XCTest processes don't share a plist.
+        suiteName = "BeaconPrivacyTests-\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
     }
 
